@@ -4,6 +4,7 @@
 
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { stream, contextToOpenAIMessages, type Model, type Context, type StreamEvent } from './llm.js'
+import { collect } from './test-utils.js'
 
 // --- helpers -------------------------------------------------------------
 
@@ -24,13 +25,6 @@ function sseResponse(body: string, init: ResponseInit = {}): Response {
     },
   })
   return new Response(stream, init)
-}
-
-/** Drive a stream generator to completion and collect all events. */
-async function collect(gen: AsyncGenerator<StreamEvent>): Promise<StreamEvent[]> {
-  const out: StreamEvent[] = []
-  for await (const ev of gen) out.push(ev)
-  return out
 }
 
 afterEach(() => {
@@ -141,6 +135,10 @@ describe('stream — SSE parsing', () => {
     const events = await collect(stream(model, { messages: [] }))
     expect(events).toHaveLength(1)
     expect(events[0].type).toBe('error')
+    if (events[0].type === 'error') {
+      expect(events[0].error).toBeInstanceOf(Error)
+      expect(events[0].error.message).toBe('network down')
+    }
   })
 
   it('emits an error event on a non-ok response', async () => {
@@ -149,6 +147,10 @@ describe('stream — SSE parsing', () => {
     const events = await collect(stream(model, { messages: [] }))
     expect(events).toHaveLength(1)
     expect(events[0].type).toBe('error')
+    if (events[0].type === 'error') {
+      expect(events[0].error).toBeInstanceOf(Error)
+      expect(events[0].error.message).toContain('API 500')
+    }
   })
 
   it('tolerates unparseable SSE lines without emitting events for them', async () => {

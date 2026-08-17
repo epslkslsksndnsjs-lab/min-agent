@@ -5,6 +5,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { runAgent, type AgentTool, type AgentEvent } from './agent.js'
 import { stream, type Model, type Context, type StreamEvent } from './llm.js'
+import { collect } from './test-utils.js'
 
 vi.mock('./llm.js', async (importOriginal) => {
   const actual = await importOriginal() as typeof import('./llm.js')
@@ -22,12 +23,6 @@ function mockStream(...sequences: StreamEvent[][]): void {
       for (const ev of seq) yield ev
     })
   }
-}
-
-async function collect(gen: AsyncGenerator<AgentEvent>): Promise<AgentEvent[]> {
-  const out: AgentEvent[] = []
-  for await (const ev of gen) out.push(ev)
-  return out
 }
 
 afterEach(() => {
