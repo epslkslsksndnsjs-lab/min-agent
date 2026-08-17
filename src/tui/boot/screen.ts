@@ -1,4 +1,5 @@
 import { Input } from '../components/input.js'
+import { getKeybindings } from '../keybindings.js'
 import { TUI } from '../tui.js'
 import type { Terminal } from '../terminal.js'
 import { Footer } from './footer.js'
@@ -42,6 +43,17 @@ export function createBootScreen(terminal: Terminal, options: BootScreenOptions)
   const tui = new TUI(terminal)
   tui.setFocus(input)
   tui.enterFullscreen({ scroll: [header, transcript], dock })
+
+  // Expand-all toggle for collapsible tool blocks. Handled at the boot layer
+  // so the generic TUI core stays unaware of transcript semantics.
+  tui.addInputListener((data) => {
+    if (getKeybindings().matches(data, 'tui.tools.expand')) {
+      transcript.toggleToolsExpanded()
+      tui.requestRender()
+      return { consume: true }
+    }
+    return undefined
+  })
 
   return { tui, transcript, input, footer }
 }

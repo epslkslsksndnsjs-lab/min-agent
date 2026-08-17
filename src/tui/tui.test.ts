@@ -303,3 +303,57 @@ describe('mouse interaction', () => {
     expect(stripAnsi(term.output)).toContain('hello world')
   })
 })
+
+describe('tool block expansion', () => {
+  it('toggles every tool block via ctrl+o', async () => {
+    const { term, boot } = await startBoot()
+    boot.transcript.addTool('read_file', { path: '/x' })
+    boot.transcript.setToolResult('contents')
+    boot.tui.requestRender()
+    await flushRender()
+    expect(boot.transcript.getToolsExpanded()).toBe(false)
+    expect(stripAnsi(term.output)).toContain('Tool: read_file (ctrl+o to expand)')
+
+    term.emitInput('\x0f') // ctrl+o
+    await flushRender()
+    expect(boot.transcript.getToolsExpanded()).toBe(true)
+    expect(stripAnsi(term.output)).toContain('  contents')
+    const before = term.output.length
+
+    term.emitInput('\x0f') // ctrl+o — collapse again
+    await flushRender()
+    expect(boot.transcript.getToolsExpanded()).toBe(false)
+    // The repaint no longer writes the result body
+    expect(stripAnsi(term.output.slice(before))).not.toContain('  contents')
+  })
+
+  it('keeps the scroll position while expanding and collapsing', async () => {
+    const { boot } = await startBoot()
+    // 30 collapsed tool blocks overflow the 23-row transcript window
+    for (let i = 0; i < 30; i++) {
+      boot.transcript.addTool(`t${i}`)
+      boot.transcript.setToolResult(`r${i}`)
+    }
+    boot.tui.requestRender()
+    await flushRender()
+    // Scroll up a few lines from the bottom and pause following
+    boot.tui.scrollBy(-3)
+    await flushRender()
+    expect(boot.tui.getScrollInfo()?.following).toBe(false)
+    const anchor = boot.tui.getScrollInfo()?.linesAbove
+
+    // Expanding lengthens the transcript; the anchor must not jump
+    boot.transcript.setToolsExpanded(true)
+    boot.tui.requestRender()
+    await flushRender()
+    expect(boot.tui.getScrollInfo()?.linesAbove).toBe(anchor)
+    expect(boot.tui.getScrollInfo()?.following).toBe(false)
+
+    // Collapsing shortens it again; the anchor still holds
+    boot.transcript.setToolsExpanded(false)
+    boot.tui.requestRender()
+    await flushRender()
+    expect(boot.tui.getScrollInfo()?.linesAbove).toBe(anchor)
+    expect(boot.tui.getScrollInfo()?.following).toBe(false)
+  })
+})

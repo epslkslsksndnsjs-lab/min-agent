@@ -36,6 +36,8 @@ export interface Keybindings {
   'tui.viewport.pageDown': true
   'tui.viewport.top': true
   'tui.viewport.follow': true
+  // Fullscreen transcript tool blocks
+  'tui.tools.expand': true
   // Generic selection actions
   'tui.select.up': true
   'tui.select.down': true
@@ -157,6 +159,10 @@ export const TUI_KEYBINDINGS = {
   'tui.viewport.follow': {
     defaultKeys: 'ctrl+shift+down',
     description: 'Scroll to bottom and follow output (fullscreen)',
+  },
+  'tui.tools.expand': {
+    defaultKeys: 'ctrl+o',
+    description: 'Expand or collapse all tool blocks (fullscreen)',
   },
   'tui.select.up': { defaultKeys: 'up', description: 'Move selection up' },
   'tui.select.down': { defaultKeys: 'down', description: 'Move selection down' },

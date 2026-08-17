@@ -48,8 +48,13 @@ describe('AgentEventAdapter', () => {
     }
     const rendered = stripAnsi(term.output)
     expect(rendered).toContain('Assistant: Hello')
+    // Tool blocks render collapsed; the result stays hidden until expanded
     expect(rendered).toContain('Tool: read_file')
-    expect(rendered).toContain('data')
+    expect(rendered).not.toContain('data')
+    boot.transcript.setToolsExpanded(true)
+    boot.tui.requestRender()
+    await flushRender()
+    expect(stripAnsi(term.output)).toContain('data')
   })
 
   it('streams assistant deltas into one block and opens a new one after a tool round', async () => {
@@ -109,6 +114,7 @@ describe('hydrateTranscript', () => {
       { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'data' }] },
     ]
     const t = hydrateTranscript(messages)
+    t.setToolsExpanded(true)
     expect(t.render(80).map(stripAnsi)).toEqual(['Tool: read_file', '  {"path":"/x"}', '  data'])
   })
 

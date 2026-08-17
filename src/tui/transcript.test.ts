@@ -43,10 +43,19 @@ describe('Transcript role-labeled blocks', () => {
     expect(t.getBlocks()).toHaveLength(2)
   })
 
-  it('renders tool blocks with name, args, and result', () => {
+  it('renders tool blocks collapsed by default with the expand hint', () => {
     const t = new Transcript()
     t.addTool('read_file', { path: '/tmp/x' })
     t.setToolResult('contents')
+    expect(t.getBlocks()).toMatchObject([{ kind: 'tool', name: 'read_file', expanded: false }])
+    expect(t.render(80).map(stripAnsi)).toEqual(['Tool: read_file (ctrl+o to expand)'])
+  })
+
+  it('expands all tool blocks and renders args and result', () => {
+    const t = new Transcript()
+    t.addTool('read_file', { path: '/tmp/x' })
+    t.setToolResult('contents')
+    t.setToolsExpanded(true)
     expect(t.render(80).map(stripAnsi)).toEqual([
       'Tool: read_file',
       '  {"path":"/tmp/x"}',
@@ -54,9 +63,44 @@ describe('Transcript role-labeled blocks', () => {
     ])
   })
 
-  it('renders a tool block without args or result', () => {
+  it('collapses all tool blocks again via setToolsExpanded(false)', () => {
+    const t = new Transcript()
+    t.addTool('read_file', { path: '/tmp/x' })
+    t.setToolResult('contents')
+    t.setToolsExpanded(true)
+    t.setToolsExpanded(false)
+    expect(t.render(80).map(stripAnsi)).toEqual(['Tool: read_file (ctrl+o to expand)'])
+  })
+
+  it('toggles the expand-all state across every tool block', () => {
+    const t = new Transcript()
+    t.addTool('a')
+    t.addTool('b')
+    t.toggleToolsExpanded()
+    expect(t.getToolsExpanded()).toBe(true)
+    expect(t.getBlocks().map((b) => (b.kind === 'tool' ? b.expanded : null))).toEqual([true, true])
+    t.toggleToolsExpanded()
+    expect(t.getToolsExpanded()).toBe(false)
+    expect(t.getBlocks().map((b) => (b.kind === 'tool' ? b.expanded : null))).toEqual([false, false])
+  })
+
+  it('new tool blocks inherit the expand-all state', () => {
+    const t = new Transcript()
+    t.addTool('before')
+    expect(t.getBlocks()).toMatchObject([{ kind: 'tool', name: 'before', expanded: false }])
+    t.setToolsExpanded(true)
+    t.addTool('after')
+    // The flip applies to existing blocks; new ones start from the state
+    expect(t.getBlocks()).toMatchObject([
+      { kind: 'tool', name: 'before', expanded: true },
+      { kind: 'tool', name: 'after', expanded: true },
+    ])
+  })
+
+  it('renders an expanded tool block without args or result', () => {
     const t = new Transcript()
     t.addTool('read_file')
+    t.setToolsExpanded(true)
     expect(t.render(80).map(stripAnsi)).toEqual(['Tool: read_file'])
   })
 
