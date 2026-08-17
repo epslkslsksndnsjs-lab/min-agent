@@ -27,6 +27,13 @@ export class InputDock implements Component {
   }
 
   render(width: number): string[] {
-    return [...this.footer.render(width), ...this.input.render(width)]
+    const footerLines = this.footer.render(width)
+    const inputLines = this.input.render(width)
+    // When the status line is active, lift it a few rows above the prompt so
+    // it reads as a status band rather than hugging the input line.
+    if (footerLines.length > 0) {
+      return [...footerLines, '', '', ...inputLines]
+    }
+    return inputLines
   }
 }
