@@ -19,7 +19,8 @@
     "build": "tsc",
     "dev": "tsx src/cli.ts",
     "test": "vitest run",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "smoke": "npm run build && node scripts/tui-smoke.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

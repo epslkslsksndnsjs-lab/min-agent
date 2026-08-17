@@ -3,10 +3,12 @@
 // it and keeps the CLI wiring (user input -> agent loop -> TUI -> persist).
 
 import { runAgent } from './agent.js'
-import { Tui } from './tui.js'
 import { builtinTools } from './tools.js'
 import { loadSession, persistSession } from './session.js'
 import type { Model, Context } from './llm.js'
+import { createBootScreen } from './tui/boot/screen.js'
+import { AgentEventAdapter, hydrateTranscript } from './tui/event-adapter.js'
+import { ProcessTerminal } from './tui/terminal.js'
 
 export { loadSession, persistSession } from './session.js'
 
@@ -88,40 +90,55 @@ async function main() {
   }
 
   const tools = builtinTools()
-  const tui = new Tui()
 
-  // Each turn: user input -> runAgent -> forward events to TUI -> persist
-  tui.onPrompt(async (text) => {
+  const terminal = new ProcessTerminal()
+  const boot = createBootScreen(terminal, {
+    model: model.model,
+    cwd: process.cwd(),
+    wordmark: 'min-agent',
+    startHint: 'type to start',
+  })
+  // Replay the persisted conversation so it is visible at boot
+  hydrateTranscript(context.messages, boot.transcript)
+  terminal.setTitle('min-agent')
+
+  const { tui, input } = boot
+  const adapter = new AgentEventAdapter(boot.transcript, () => tui.requestRender(), input, boot.footer)
+
+  let busy = false
+  let ctrl: AbortController | null = null
+  // Ctrl+C / Escape routes through Input's cancel binding; abort only the
+  // running turn (a null controller while idle is a no-op).
+  input.onEscape = () => ctrl?.abort()
+
+  // Each turn: user input -> runAgent -> forward events to the TUI -> persist
+  input.onSubmit = (text) => {
+    if (busy) return // Block concurrent turns while the agent runs
+    void runTurn(text)
+  }
+
+  async function runTurn(text: string): Promise<void> {
+    busy = true
+    adapter.submit(text)
+    context.messages.push({ role: 'user', content: text })
+    ctrl = new AbortController()
     try {
-      context.messages.push({ role: 'user', content: text })
-
-      tui.setBusy(true)
-      const ctrl = new AbortController()
-      tui.onAbort(() => ctrl.abort())  // A new AbortController is created each turn, so re-register the callback to point at the new controller
-
       for await (const ev of runAgent(model, context, tools, ctrl.signal)) {
-        switch (ev.type) {
-          case 'assistant_text': tui.printText(ev.delta); break
-          case 'tool_call': tui.printToolCall(ev.name, ev.args); break
-          case 'tool_result': tui.printToolResult(ev.name, ev.result); break
-          case 'turn_end':
-            if (ev.stopReason === 'max_tokens') tui.printText('\n[output truncated by max_tokens]')
-            if (ev.stopReason === 'error') tui.printText('\n[error occurred]')
-            tui.printTurnEnd()
-            break
+        if (ev.type === 'turn_end' && ev.stopReason === 'max_tokens') {
+          adapter.handle({ type: 'assistant_text', delta: '\n[output truncated by max_tokens]' })
         }
+        adapter.handle(ev)
       }
-
       await persistSession(context.messages)
     } catch (e) {
-      console.error(`\n[error] ${(e as Error).message}`)
+      adapter.handle({ type: 'assistant_text', delta: `\n[error] ${(e as Error).message}` })
     } finally {
-      tui.setBusy(false)
+      ctrl = null
+      busy = false
     }
-  })
+  }
 
   tui.start()
-
 }
 
 // Only start when run directly (not when imported)

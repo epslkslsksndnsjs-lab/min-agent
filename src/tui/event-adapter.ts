@@ -92,12 +92,12 @@ export class AgentEventAdapter {
 }
 
 /**
- * Build a transcript from persisted session messages, so a previous
+ * Populate a transcript from persisted session messages, so a previous
  * conversation is visible at boot. Text blocks render as role-labeled
  * blocks; tool_use / tool_result content blocks pair into tool blocks.
+ * Without an explicit target, a fresh transcript is created and returned.
  */
-export function hydrateTranscript(messages: readonly Message[]): Transcript {
-  const transcript = new Transcript()
+export function hydrateTranscript(messages: readonly Message[], transcript = new Transcript()): Transcript {
   for (const msg of messages) {
     if (typeof msg.content === 'string') {
       if (msg.role === 'user') transcript.addUser(msg.content)
