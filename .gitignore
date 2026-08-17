@@ -9,3 +9,8 @@ tmp.md
 .vercel
 docs/plans/
 docs/specs/
+# Agent skills setup artifacts (local-only, not tracked)
+AGENTS.md
+CONTEXT.md
+docs/agents/
+docs/adr/
