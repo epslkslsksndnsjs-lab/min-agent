@@ -3,7 +3,15 @@
 // a Response whose body is an SSE byte stream, then assert the emitted event sequence.
 
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { stream, contextToOpenAIMessages, type Model, type Context, type StreamEvent } from './llm.js'
+import {
+  stream,
+  contextToOpenAIMessages,
+  estimateTokens,
+  TokenTracker,
+  type Model,
+  type Context,
+  type StreamEvent,
+} from './llm.js'
 import { collect } from './test-utils.js'
 
 // --- helpers -------------------------------------------------------------
@@ -163,5 +171,78 @@ describe('stream — SSE parsing', () => {
       { type: 'text_delta', delta: 'ok' },
       { type: 'done', stopReason: 'end_turn' },
     ])
+  })
+
+  it('emits a usage event from the final chunk when usage is requested', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => sseResponse(sseBody(
+      { choices: [{ delta: { content: 'hi' } }] },
+      { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      { choices: [], usage: { prompt_tokens: 12, completion_tokens: 5, total_tokens: 17 } },
+    ))))
+
+    const events = await collect(stream(model, { messages: [] }))
+    expect(events).toEqual([
+      { type: 'text_delta', delta: 'hi' },
+      { type: 'usage', usage: { promptTokens: 12, completionTokens: 5, totalTokens: 17 } },
+      { type: 'done', stopReason: 'end_turn' },
+    ])
+  })
+
+  it('requests usage via stream_options.include_usage', async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => sseResponse(''))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await collect(stream(model, { messages: [] }))
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
+    expect(body.stream_options).toEqual({ include_usage: true })
+  })
+
+  it('ignores a usage chunk that lacks total_tokens', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => sseResponse(sseBody(
+      { choices: [], usage: { prompt_tokens: 1 } },
+      { choices: [{ delta: { content: 'x' } }] },
+    ))))
+
+    const events = await collect(stream(model, { messages: [] }))
+    expect(events).toEqual([
+      { type: 'text_delta', delta: 'x' },
+      { type: 'done', stopReason: 'end_turn' },
+    ])
+  })
+})
+
+// --- token accounting ----------------------------------------------------
+
+describe('token accounting', () => {
+  it('estimates tokens as chars / 4 rounded up', () => {
+    expect(estimateTokens(0)).toBe(0)
+    expect(estimateTokens(4)).toBe(1)
+    expect(estimateTokens(5)).toBe(2)
+    expect(estimateTokens(100)).toBe(25)
+  })
+
+  it('reports the character estimate while streaming', () => {
+    const tracker = new TokenTracker()
+    tracker.addChars(40)
+    expect(tracker.reported).toBe(10)
+  })
+
+  it('never decreases when authoritative usage arrives', () => {
+    const tracker = new TokenTracker()
+    tracker.addChars(40) // estimate 10
+    expect(tracker.reported).toBe(10)
+
+    tracker.setAuthoritative(30)
+    expect(tracker.reported).toBe(30)
+
+    // A stale or smaller authoritative value must not lower the count
+    tracker.setAuthoritative(5)
+    expect(tracker.reported).toBe(30)
+
+    tracker.addChars(40) // estimate 20, still below authoritative
+    expect(tracker.reported).toBe(30)
+
+    tracker.addChars(80) // estimate 40 now exceeds authoritative
+    expect(tracker.reported).toBe(40)
   })
 })

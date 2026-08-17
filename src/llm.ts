@@ -37,6 +37,7 @@ export type Context = {
 export type StreamEvent =
   | { type: 'text_delta'; delta: string }
   | { type: 'tool_call'; id: string; name: string; args: unknown }
+  | { type: 'usage'; usage: { promptTokens: number; completionTokens: number; totalTokens: number } }
   | { type: 'done'; stopReason: 'end_turn' | 'tool_use' | 'max_tokens' | 'aborted' }
   | { type: 'error'; error: Error }
 
@@ -100,21 +101,37 @@ type OpenAIChunk = {
     }
     finish_reason?: string
   }>
+  /** Present on the final chunk when the request asks for usage (stream_options.include_usage). */
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
 }
 
 /** Parse one line of SSE data, accumulate tool_calls, return text_delta and stop_reason */
 function handleSSELine(
   data: string,
   toolCallBuffers: Map<number, { id: string; name: string; argsBuf: string }>,
-): { textDelta: string | null; stopReason: 'end_turn' | 'tool_use' | 'max_tokens' | null } {
+): {
+  textDelta: string | null
+  stopReason: 'end_turn' | 'tool_use' | 'max_tokens' | null
+  usage: { promptTokens: number; completionTokens: number; totalTokens: number } | null
+} {
   let chunk: OpenAIChunk
-  try { chunk = JSON.parse(data) as OpenAIChunk } catch { return { textDelta: null, stopReason: null } }
-
-  const choice = chunk.choices[0]
-  if (!choice) return { textDelta: null, stopReason: null }
+  try { chunk = JSON.parse(data) as OpenAIChunk } catch { return { textDelta: null, stopReason: null, usage: null } }
 
   let textDelta: string | null = null
   let stopReason: 'end_turn' | 'tool_use' | 'max_tokens' | null = null
+  let usage: { promptTokens: number; completionTokens: number; totalTokens: number } | null = null
+
+  // The usage chunk carries no choices — parse it before the choice guard.
+  if (chunk.usage?.total_tokens !== undefined) {
+    usage = {
+      promptTokens: chunk.usage.prompt_tokens ?? 0,
+      completionTokens: chunk.usage.completion_tokens ?? 0,
+      totalTokens: chunk.usage.total_tokens,
+    }
+  }
+
+  const choice = chunk.choices[0]
+  if (!choice) return { textDelta: null, stopReason: null, usage }
 
   if (choice.delta?.content) textDelta = choice.delta.content
 
@@ -136,7 +153,7 @@ function handleSSELine(
   if (choice.finish_reason === 'tool_calls') stopReason = 'tool_use'
   else if (choice.finish_reason === 'length') stopReason = 'max_tokens'
 
-  return { textDelta, stopReason }
+  return { textDelta, stopReason, usage }
 }
 
 /** At stream end: emit the accumulated tool_calls in order */
@@ -171,7 +188,7 @@ export async function* stream(
   const url = `${model.baseUrl ?? 'https://api.openai.com/v1'}/chat/completions`
   const messages = contextToOpenAIMessages(context)
 
-  const body: Record<string, unknown> = { model: model.model, stream: true, messages }
+  const body: Record<string, unknown> = { model: model.model, stream: true, messages, stream_options: { include_usage: true } }
   if (model.maxTokens) body.max_tokens = model.maxTokens
   if (opts.tools?.length) {
     body.tools = opts.tools.map(t => ({
@@ -222,6 +239,7 @@ export async function* stream(
 
         const result = handleSSELine(data, toolCallBuffers)
         if (result.textDelta) yield { type: 'text_delta', delta: result.textDelta }
+        if (result.usage) yield { type: 'usage', usage: result.usage }
         if (result.stopReason) stopReason = result.stopReason
       }
     }
@@ -235,6 +253,42 @@ export async function* stream(
     yield { type: 'tool_call', id: tc.id, name: tc.name, args: tc.args }
   }
   yield { type: 'done', stopReason: opts.signal?.aborted ? 'aborted' : stopReason }
+}
+
+// ===== token accounting =====
+
+/** Character-per-token ratio used by the streaming estimate before authoritative usage arrives. */
+export const CHARS_PER_TOKEN_ESTIMATE = 4
+
+/** Estimate the token count from a character count (streaming fallback). */
+export function estimateTokens(chars: number): number {
+  return Math.ceil(chars / CHARS_PER_TOKEN_ESTIMATE)
+}
+
+/**
+ * Tracks the reported token count during streaming. The character-based
+ * estimate grows monotonically; authoritative usage (final-chunk
+ * `total_tokens`) only ever raises the reported value, so the count never
+ * dips when the real number lands.
+ */
+export class TokenTracker {
+  private chars = 0
+  private authoritative = 0
+
+  /** Account for newly streamed characters (drives the fallback estimate). */
+  addChars(n: number): void {
+    this.chars += n
+  }
+
+  /** Report authoritative usage from the final chunk. Never lowers the count. */
+  setAuthoritative(totalTokens: number): void {
+    this.authoritative = Math.max(this.authoritative, totalTokens)
+  }
+
+  /** Monotonic reported count: the higher of the estimate and authoritative usage. */
+  get reported(): number {
+    return Math.max(estimateTokens(this.chars), this.authoritative)
+  }
 }
 
 // ===== message building helpers =====

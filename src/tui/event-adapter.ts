@@ -3,26 +3,35 @@
 // no UI logic lives here.
 
 import type { AgentEvent } from '../agent.js'
-import type { Message } from '../llm.js'
+import { TokenTracker, type Message } from '../llm.js'
 import { Transcript } from './boot/transcript.js'
+import type { Footer } from './boot/footer.js'
 import type { Input } from './components/input.js'
 
 /**
  * Thin adapter connecting the agent event stream to the UI.
  * `handle` maps each event to transcript state, then invokes the render
  * callback so the UI repaints (render coalescing is the TUI's job).
+ * When a footer is provided, token usage (estimate + authoritative) and the
+ * elapsed time of the current turn are reported to it.
  */
 export class AgentEventAdapter {
+  private readonly tokenTracker = new TokenTracker()
+  private turnStartedAt = 0
+
   constructor(
     private readonly transcript: Transcript,
     private readonly requestRender: () => void,
     private readonly input?: Input,
+    private readonly footer?: Footer,
   ) {}
 
   /** Append the user's prompt to the transcript, clear the input, and render. */
   submit(text: string): void {
     this.transcript.addUser(text)
     this.input?.setValue('')
+    this.turnStartedAt = Date.now()
+    this.updateFooter()
     this.requestRender()
   }
 
@@ -32,6 +41,7 @@ export class AgentEventAdapter {
       case 'assistant_text':
         // Streams into its own Assistant block (no separate thinking stage)
         this.transcript.appendAssistant(ev.delta)
+        this.tokenTracker.addChars(ev.delta.length)
         break
       case 'tool_call':
         this.transcript.addTool(ev.name, ev.args)
@@ -39,11 +49,23 @@ export class AgentEventAdapter {
       case 'tool_result':
         this.transcript.setToolResult(ev.result)
         break
+      case 'usage':
+        this.tokenTracker.setAuthoritative(ev.usage.totalTokens)
+        break
       case 'turn_end':
         this.transcript.endTurn()
         break
     }
+    this.updateFooter()
     this.requestRender()
+  }
+
+  private updateFooter(): void {
+    if (!this.footer) return
+    this.footer.setTokens(this.tokenTracker.reported)
+    if (this.turnStartedAt > 0) {
+      this.footer.setElapsed(Date.now() - this.turnStartedAt)
+    }
   }
 }
 

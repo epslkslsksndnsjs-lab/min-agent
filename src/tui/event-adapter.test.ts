@@ -96,6 +96,22 @@ describe('AgentEventAdapter', () => {
     expect(boot.input.getValue()).toBe('')
     expect(stripAnsi(term.output)).toContain('You: hi')
   })
+
+  it('reports the character estimate, authoritative usage, and elapsed time to the footer', async () => {
+    const { boot } = await startBoot()
+    const adapter = new AgentEventAdapter(boot.transcript, () => boot.tui.requestRender(), boot.input, boot.footer)
+
+    adapter.submit('hi')
+    adapter.handle({ type: 'assistant_text', delta: 'abcdefgh' }) // 8 chars -> estimate 2
+    expect(stripAnsi(boot.footer.render(80)[0])).toMatch(/↓ 2 tokens · 00:00/)
+
+    vi.advanceTimersByTime(65_000)
+    adapter.handle({ type: 'assistant_text', delta: 'x' })
+    expect(stripAnsi(boot.footer.render(80)[0])).toContain('01:05')
+
+    adapter.handle({ type: 'usage', usage: { promptTokens: 10, completionTokens: 40, totalTokens: 50 } })
+    expect(stripAnsi(boot.footer.render(80)[0])).toContain('↓ 50 tokens')
+  })
 })
 
 describe('hydrateTranscript', () => {

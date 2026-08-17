@@ -17,6 +17,7 @@ export type AgentEvent =
   | { type: 'assistant_text'; delta: string }
   | { type: 'tool_call'; id: string; name: string; args: unknown }
   | { type: 'tool_result'; id: string; name: string; result: string }
+  | { type: 'usage'; usage: { promptTokens: number; completionTokens: number; totalTokens: number } }
   | { type: 'turn_end'; stopReason: 'end_turn' | 'max_tokens' | 'aborted' | 'error' }
 
 /** Compaction threshold: compact old messages once count exceeds this */
@@ -97,6 +98,8 @@ export async function* runAgent(
       } else if (ev.type === 'tool_call') {
         toolCalls.push({ id: ev.id, name: ev.name, args: ev.args })
         yield { type: 'tool_call', id: ev.id, name: ev.name, args: ev.args }
+      } else if (ev.type === 'usage') {
+        yield { type: 'usage', usage: ev.usage }
       } else if (ev.type === 'done') {
         stopReason = ev.stopReason
         if (ev.stopReason === 'aborted') {
