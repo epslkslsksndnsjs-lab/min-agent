@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.superpowers/
+.DS_Store
+.env*
+!.env.example
+*.log
+tmp.md
+.vercel
+docs/plans/
+docs/specs/

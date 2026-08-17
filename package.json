@@ -1,0 +1,26 @@
+{
+  "name": "min-agent",
+  "version": "0.1.0",
+  "description": "min-cli — a TypeScript coding assistant with OpenAI-compatible streaming tool-calling.",
+  "license": "MIT",
+  "keywords": [
+    "cli",
+    "coding-assistant",
+    "agent-loop",
+    "llm",
+    "tool-calling",
+    "typescript"
+  ],
+  "type": "module",
+  "bin": { "min-agent": "./dist/cli.js" },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.ts"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "tsx": "^4.19.0",
+    "@types/node": "^22.0.0"
+  }
+}
