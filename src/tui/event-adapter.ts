@@ -18,6 +18,7 @@ import type { Input } from './components/input.js'
 export class AgentEventAdapter {
   private readonly tokenTracker = new TokenTracker()
   private turnStartedAt = 0
+  private elapsedTimer: ReturnType<typeof setInterval> | undefined
 
   constructor(
     private readonly transcript: Transcript,
@@ -33,6 +34,7 @@ export class AgentEventAdapter {
     this.turnStartedAt = Date.now()
     this.updateFooter()
     this.requestRender()
+    this.startElapsedTicker()
   }
 
   /** Map one agent event to transcript state and request a render. */
@@ -54,10 +56,30 @@ export class AgentEventAdapter {
         break
       case 'turn_end':
         this.transcript.endTurn()
+        this.stopElapsedTicker()
         break
     }
     this.updateFooter()
     this.requestRender()
+  }
+
+  /**
+   * Keep the elapsed timer advancing during long stretches without stream
+   * events (e.g. the model's think delay), so the footer clock does not freeze
+   * between deltas. The token estimate still updates on each event.
+   */
+  private startElapsedTicker(): void {
+    this.stopElapsedTicker()
+    this.elapsedTimer = setInterval(() => {
+      if (this.turnStartedAt > 0) this.updateFooter()
+    }, 250)
+  }
+
+  private stopElapsedTicker(): void {
+    if (this.elapsedTimer) {
+      clearInterval(this.elapsedTimer)
+      this.elapsedTimer = undefined
+    }
   }
 
   private updateFooter(): void {
