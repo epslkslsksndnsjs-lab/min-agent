@@ -32,8 +32,8 @@ describe('formatElapsed', () => {
 })
 
 describe('Footer', () => {
-  it('renders an empty row until stats are set', () => {
-    expect(new Footer().render(80)).toEqual([''])
+  it('renders no rows until stats are set', () => {
+    expect(new Footer().render(80)).toEqual([])
   })
 
   it('renders the run-status line with tokens and elapsed time', () => {

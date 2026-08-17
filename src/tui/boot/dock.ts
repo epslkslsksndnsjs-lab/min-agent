@@ -3,8 +3,9 @@ import { Footer } from './footer.js'
 import { Input } from '../components/input.js'
 
 /**
- * Input dock: the single-line input box with the footer pinned beneath it.
- * Rendered as the fullscreen dock so both stay at the bottom of the screen.
+ * Input dock: the run-status line above the single-line input box. When the
+ * status line is active it appears just above the prompt; when inactive the
+ * prompt sits at the bottom of the screen.
  */
 export class InputDock implements Component {
   private footer: Footer
@@ -26,6 +27,6 @@ export class InputDock implements Component {
   }
 
   render(width: number): string[] {
-    return [...this.input.render(width), ...this.footer.render(width)]
+    return [...this.footer.render(width), ...this.input.render(width)]
   }
 }

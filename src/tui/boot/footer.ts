@@ -2,9 +2,9 @@ import type { Component } from '../tui.js'
 import { styleText } from './theme.js'
 
 /**
- * Footer pinned to the bottom of the dock. Renders the run-status line
- * `↓ {tokens} tokens · {elapsed}` once token/elapsed data is set; until then
- * it renders an empty row so the layout is stable.
+ * Run-status line rendered above the input dock. Shows `↓ {tokens} tokens ·
+ * {elapsed}` once the agent starts streaming; before that it returns no rows so
+ * the input prompt sits at the bottom of the screen.
  */
 
 /** Format a token count with thousands separators, e.g. 12345 -> "12,345". */
@@ -42,7 +42,8 @@ export class Footer implements Component {
   }
 
   render(_width: number): string[] {
-    const line = this.active ? `↓ ${formatTokens(this.tokens)} tokens · ${formatElapsed(this.elapsedMs)}` : ''
-    return [line === '' ? '' : styleText('muted', line)]
+    if (!this.active) return []
+    const line = `↓ ${formatTokens(this.tokens)} tokens · ${formatElapsed(this.elapsedMs)}`
+    return [styleText('muted', line)]
   }
 }
