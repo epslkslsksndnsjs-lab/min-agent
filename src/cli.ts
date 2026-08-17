@@ -1,16 +1,14 @@
 // src/cli.ts
-// Entry point. Session persistence: after each turn, append context.messages to ~/.min-agent/session.jsonl.
+// Entry point. Session persistence lives in session.ts; this module re-exports
+// it and keeps the CLI wiring (user input -> agent loop -> TUI -> persist).
 
-import { promises as fs } from 'node:fs'
-import * as path from 'node:path'
-import * as os from 'node:os'
 import { runAgent } from './agent.js'
 import { Tui } from './tui.js'
 import { builtinTools } from './tools.js'
-import type { Model, Context, Message } from './llm.js'
+import { loadSession, persistSession } from './session.js'
+import type { Model, Context } from './llm.js'
 
-const SESSION_DIR = path.join(os.homedir(), '.min-agent')
-const SESSION_FILE = path.join(SESSION_DIR, 'session.jsonl')
+export { loadSession, persistSession } from './session.js'
 
 /** Fixed system prompt */
 const SYSTEM_PROMPT = `You are min-cli — the coding assistant for the min-agent workspace.
@@ -75,10 +73,6 @@ Tools available:
 - edit
 - run_bash`
 
-// Track how many messages are already persisted; only append the new ones.
-// This is CLI process-level state (not agent state — the agent is stateless; context IS the state).
-let persistedCount = 0
-
 async function main() {
   const model: Model = {
     apiKey: process.env.MIN_AGENT_API_KEY ?? '',
@@ -128,32 +122,6 @@ async function main() {
 
   tui.start()
 
-}
-
-/** Load historical messages on startup to resume the last conversation (exported for tests) */
-export async function loadSession(file: string = SESSION_FILE): Promise<Message[]> {
-  try {
-    const data = await fs.readFile(file, 'utf-8')
-    const lines = data.trim().split('\n').filter(Boolean)
-    // Per-line fault tolerance: skip corrupted lines instead of discarding all history (a crash may write a half line of JSON)
-    const messages = lines.flatMap(line => {
-      try { return [JSON.parse(line) as Message] } catch { return [] }
-    })
-    persistedCount = messages.length  // Don't re-write what's already loaded
-    return messages
-  } catch {
-    return []  // File missing — start empty
-  }
-}
-
-/** Persist messages to the session file (exported for tests) */
-export async function persistSession(messages: Message[], file: string = SESSION_FILE): Promise<void> {
-  await fs.mkdir(path.dirname(file) || '.', { recursive: true })
-  const newMessages = messages.slice(persistedCount)
-  for (const msg of newMessages) {
-    await fs.appendFile(file, JSON.stringify(msg) + '\n', 'utf-8')
-  }
-  persistedCount = messages.length
 }
 
 // Only start when run directly (not when imported)

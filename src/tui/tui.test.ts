@@ -6,6 +6,7 @@ import { createBootScreen } from './boot/screen.js'
 import { Text } from './components/text.js'
 import { FakeTerminal } from './fake-terminal.js'
 import { TUI } from './tui.js'
+import { stripAnsi } from './utils.js'
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'] })
@@ -72,10 +73,10 @@ describe('boot screen', () => {
     expect(term.output).toContain('> ')
   })
 
-  it('appends a transcript row when typing and submitting', async () => {
+  it('appends a role-labeled transcript row when typing and submitting', async () => {
     const { term, boot } = await startBoot()
     boot.input.onSubmit = (value) => {
-      boot.transcript.appendLine(`You: ${value}`)
+      boot.transcript.addUser(value)
     }
 
     term.emitInput('h')
@@ -89,8 +90,8 @@ describe('boot screen', () => {
     const before = term.output.length
     term.emitInput('\r')
     await flushRender()
-    expect(boot.transcript.getLines()).toEqual(['You: hello'])
-    expect(term.output.slice(before)).toContain('You: hello')
+    expect(boot.transcript.getBlocks()).toEqual([{ kind: 'user', text: 'hello' }])
+    expect(stripAnsi(term.output.slice(before))).toContain('You: hello')
   })
 
   it('renders the input cursor marker at the IME position', async () => {

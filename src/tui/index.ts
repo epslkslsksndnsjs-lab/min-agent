@@ -5,8 +5,10 @@ export { createBootScreen, type BootScreen, type BootScreenOptions } from './boo
 export { Footer } from './boot/footer.js'
 export { Header, formatSplashCwd, type HeaderMetadataLine, type HeaderOptions } from './boot/header.js'
 export { InputDock } from './boot/dock.js'
-export { Transcript } from './boot/transcript.js'
+export { Transcript, type TranscriptBlock } from './boot/transcript.js'
 export { styleText, type TextStyle } from './boot/theme.js'
+// Agent event pipeline
+export { AgentEventAdapter, hydrateTranscript } from './event-adapter.js'
 // Components
 export { Box } from './components/box.js'
 export { Input } from './components/input.js'
