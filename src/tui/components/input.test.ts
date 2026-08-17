@@ -119,3 +119,91 @@ describe('Input — rendering', () => {
     expect(stripAnsi(line).length).toBeLessThanOrEqual(20)
   })
 })
+
+describe('Input — word movement and deletion', () => {
+  it('moves by word with alt+b / alt+f', () => {
+    const input = new Input()
+    input.handleInput('hello world')
+    input.handleInput('\x1bb') // alt+b
+    expect(input.getCursor()).toBe(6)
+    input.handleInput('\x1bb') // alt+b
+    expect(input.getCursor()).toBe(0)
+    input.handleInput('\x1bf') // alt+f
+    expect(input.getCursor()).toBe(5)
+    input.handleInput('\x1bf') // alt+f
+    expect(input.getCursor()).toBe(11)
+  })
+
+  it('deletes a word backward with ctrl+w', () => {
+    const input = new Input()
+    input.handleInput('hello world')
+    input.handleInput('\x17') // ctrl+w
+    expect(input.getValue()).toBe('hello ')
+    expect(input.getCursor()).toBe(6)
+  })
+
+  it('deletes a word forward with alt+d', () => {
+    const input = new Input()
+    input.handleInput('hello world')
+    input.handleInput('\x01') // ctrl+a (line start)
+    input.handleInput('\x1bd') // alt+d
+    expect(input.getValue()).toBe(' world')
+    expect(input.getCursor()).toBe(0)
+  })
+})
+
+describe('Input — kill ring (kill / yank / yank-pop)', () => {
+  it('accumulates consecutive kills and yanks them back with ctrl+y', () => {
+    const input = new Input()
+    input.handleInput('hello world')
+    input.handleInput('\x17') // ctrl+w — kill 'world'
+    expect(input.getValue()).toBe('hello ')
+    input.handleInput('\x17') // ctrl+w — accumulates 'hello ' with 'world'
+    expect(input.getValue()).toBe('')
+    input.handleInput('\x19') // ctrl+y — yank
+    expect(input.getValue()).toBe('hello world')
+    expect(input.getCursor()).toBe(11)
+  })
+
+  it('cycles the kill ring with alt+y (yank-pop)', () => {
+    const input = new Input()
+    input.handleInput('aaa bbb')
+    input.handleInput('\x02') // ctrl+b x3 — move before 'bbb'
+    input.handleInput('\x02')
+    input.handleInput('\x02')
+    input.handleInput('\x0b') // ctrl+k — kill 'bbb' (cursor 4, not at end)
+    expect(input.getValue()).toBe('aaa ')
+    input.handleInput('\x01') // ctrl+a (line start, breaks accumulation)
+    input.handleInput('\x0b') // ctrl+k — kill 'aaa '
+    expect(input.getValue()).toBe('')
+    input.handleInput('\x19') // ctrl+y — yank most recent ('aaa ')
+    input.handleInput('\x1by') // alt+y — yank-pop to 'bbb'
+    expect(input.getValue()).toBe('bbb')
+    expect(input.getCursor()).toBe(3)
+  })
+
+  it('undoes a kill operation with ctrl+-', () => {
+    const input = new Input()
+    input.handleInput('hello world')
+    input.handleInput('\x02') // ctrl+b x5 — move to middle
+    input.handleInput('\x02')
+    input.handleInput('\x02')
+    input.handleInput('\x02')
+    input.handleInput('\x02')
+    input.handleInput('\x0b') // ctrl+k — kill 'world'
+    expect(input.getValue()).toBe('hello ')
+    input.handleInput('\x1f') // ctrl+-
+    expect(input.getValue()).toBe('hello world')
+  })
+})
+
+describe('Input — grapheme cursor movement', () => {
+  it('moves the cursor across grapheme clusters (emoji)', () => {
+    const input = new Input()
+    input.handleInput('a👍b')
+    input.handleInput('\x02') // ctrl+b
+    expect(input.getCursor()).toBe(3) // past 'a' + '👍' (surrogate pair)
+    input.handleInput('\x02') // ctrl+b
+    expect(input.getCursor()).toBe(1)
+  })
+})
