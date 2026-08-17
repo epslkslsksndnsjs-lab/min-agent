@@ -363,6 +363,11 @@ function extractAnsiCodeAt(str: string, pos: number, state?: AnsiScanState): Ans
   return end === null ? null : { code: str.substring(pos, end), length: end - pos }
 }
 
+/** Extract an ANSI escape sequence from a string at the given position. */
+export function extractAnsiCode(str: string, pos: number): AnsiCode | null {
+  return extractAnsiCodeAt(str, pos)
+}
+
 /** Create a scanner whose malformed-control-string cache is released after this string scan. */
 export function createAnsiCodeExtractor(str: string): (pos: number) => AnsiCode | null {
   const state: AnsiScanState = {}

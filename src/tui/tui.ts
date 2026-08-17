@@ -14,6 +14,12 @@ import {
   visibleWidth,
 } from './utils.js'
 
+// Termux reports terminal height changes more aggressively than desktop
+// terminals; forcing a full redraw on every resize causes visible flicker.
+function isTermuxSession(): boolean {
+  return Boolean(process.env.TERMUX_VERSION)
+}
+
 /**
  * Component interface — all components must implement this.
  */
@@ -728,8 +734,9 @@ export class TUI extends Container {
       return
     }
 
-    // Height changes normally need a full re-render to keep the visible viewport aligned
-    if (heightChanged) {
+    // Height changes normally need a full re-render to keep the visible
+    // viewport aligned; Termux resizes too aggressively to repaint every time
+    if (heightChanged && !isTermuxSession()) {
       fullRender(true)
       return
     }
