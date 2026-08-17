@@ -6,6 +6,8 @@ import type { Terminal } from './terminal.js'
 
 export class FakeTerminal implements Terminal {
   output = ''
+  clipboard = ''
+  lastOpenedLink: string | null = null
   private _columns: number
   private _rows: number
   private _kittyProtocolActive = false
@@ -119,6 +121,14 @@ export class FakeTerminal implements Terminal {
 
   setTitle(title: string): void {
     this.write(`\x1b]0;${title}\x07`)
+  }
+
+  copyToClipboard(text: string): void {
+    this.clipboard = text
+  }
+
+  openLink(url: string): void {
+    this.lastOpenedLink = url
   }
 
   /** Simulate keyboard input arriving from the terminal. */

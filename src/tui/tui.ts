@@ -4,13 +4,16 @@ import { performance } from 'node:perf_hooks'
 import { FullscreenViewport, type ScrollInfo } from './fullscreen.js'
 import { getKeybindings } from './keybindings.js'
 import { isKeyRelease } from './keys.js'
-import { isMouseSequence } from './mouse.js'
+import { isMouseSequence, MOUSE_BUTTON_LEFT, parseSgrMouseEvent, isWheelDown, isWheelUp, type MouseEvent } from './mouse.js'
 import type { Terminal } from './terminal.js'
 import {
   extractSegments,
+  findHyperlinkAt,
+  highlightColumnRange,
   normalizeTerminalOutput,
   sliceByColumn,
   sliceWithWidth,
+  stripAnsi,
   visibleWidth,
 } from './utils.js'
 
@@ -18,6 +21,27 @@ import {
 // terminals; forcing a full redraw on every resize causes visible flicker.
 function isTermuxSession(): boolean {
   return Boolean(process.env.TERMUX_VERSION)
+}
+
+// Lines scrolled per mouse wheel notch; a page per notch is too coarse for a
+// transcript, three lines keeps the viewport stable while still moving.
+const WHEEL_SCROLL_LINES = 3
+
+interface MousePosition {
+  row: number // transcript row (0-based, full transcript)
+  col: number // visible column (0-based)
+}
+
+interface MouseSelection {
+  anchor: MousePosition
+  focus: MousePosition
+}
+
+/** Normalize a selection so start <= end in row-major order. */
+function orderedSelection(anchor: MousePosition, focus: MousePosition): [MousePosition, MousePosition] {
+  return anchor.row < focus.row || (anchor.row === focus.row && anchor.col <= focus.col)
+    ? [anchor, focus]
+    : [focus, anchor]
 }
 
 /**
@@ -154,6 +178,7 @@ export class TUI extends Container {
   private fullRedrawCount = 0
   private preserveViewportOnNextRender = false // One-shot: repaint the visible viewport in place
   private stopped = false
+  private selection: MouseSelection | null = null
 
   private fullscreen: {
     viewport: FullscreenViewport
@@ -354,6 +379,7 @@ export class TUI extends Container {
     if (!this.fullscreen) return
     const { inlineState } = this.fullscreen
     this.fullscreen = null
+    this.selection = null
     this.terminal.setMouseTracking(false)
     if (options.leaveAltScreen !== false) {
       this.terminal.leaveAltScreen()
@@ -461,6 +487,8 @@ export class TUI extends Container {
 
     if (isMouseSequence(data)) {
       // consumed even when disabled — mouse reports are garbage downstream
+      const event = parseSgrMouseEvent(data)
+      if (event) this.handleMouseEvent(fullscreen, event)
       return true
     }
 
@@ -484,6 +512,108 @@ export class TUI extends Container {
       return true
     }
     return false
+  }
+
+  /**
+   * Route a parsed SGR mouse event: wheel scrolls the transcript, left-button
+   * press/drag selects, release copies the selection or opens a hyperlink.
+   * Rows map onto the full transcript via the viewport scroll offset.
+   */
+  private handleMouseEvent(fullscreen: NonNullable<TUI['fullscreen']>, event: MouseEvent): void {
+    if (isWheelUp(event)) {
+      if (fullscreen.viewportControls) this.scrollBy(-WHEEL_SCROLL_LINES)
+      return
+    }
+    if (isWheelDown(event)) {
+      if (fullscreen.viewportControls) this.scrollBy(WHEEL_SCROLL_LINES)
+      return
+    }
+    if (event.button !== MOUSE_BUTTON_LEFT) return
+
+    const pos = this.screenToTranscript(fullscreen, event.y - 1, event.x - 1)
+
+    if (event.press) {
+      if (event.motion) {
+        // Drag: extend the active selection toward the cursor
+        if (this.selection && pos) {
+          this.selection.focus = pos
+          this.requestRender()
+        }
+      } else {
+        // Press: start a fresh selection; a press outside the transcript
+        // window clears any previous selection.
+        this.selection = pos ? { anchor: pos, focus: pos } : null
+        this.requestRender()
+      }
+      return
+    }
+
+    // Release ends the gesture
+    const selection = this.selection
+    this.selection = null
+    if (!selection) return
+
+    const [start, end] = orderedSelection(selection.anchor, selection.focus)
+    const isClick = start.row === end.row && start.col === end.col
+    if (isClick) {
+      if (pos) this.tryOpenLinkAt(fullscreen, pos)
+    } else {
+      const text = this.selectionText(fullscreen, start, end)
+      if (text) this.terminal.copyToClipboard(text)
+    }
+    this.requestRender()
+  }
+
+  /** Map a screen cell (0-based) onto a full-transcript position, or null when in the dock. */
+  private screenToTranscript(
+    fullscreen: NonNullable<TUI['fullscreen']>,
+    screenRow: number,
+    screenCol: number,
+  ): MousePosition | null {
+    const windowHeight = fullscreen.viewport.windowHeight()
+    if (screenRow < 0 || screenRow >= windowHeight) return null
+    return { row: fullscreen.viewport.scrollInfo().linesAbove + screenRow, col: screenCol }
+  }
+
+  /** Plain text of the selection, joined with newlines, stripped of ANSI. */
+  private selectionText(
+    fullscreen: NonNullable<TUI['fullscreen']>,
+    start: MousePosition,
+    end: MousePosition,
+  ): string {
+    const scrollTop = fullscreen.viewport.scrollInfo().linesAbove
+    const windowHeight = fullscreen.viewport.windowHeight()
+    const transcript = this.renderScrollArea(fullscreen)
+    const lines: string[] = []
+    for (let row = start.row; row <= end.row; row++) {
+      if (row < scrollTop || row >= scrollTop + windowHeight) continue
+      const line = transcript[row] ?? ''
+      const from = row === start.row ? start.col : 0
+      const to = row === end.row ? end.col + 1 : Number.MAX_SAFE_INTEGER
+      lines.push(stripAnsi(sliceByColumn(line, from, Math.max(0, to - from))))
+    }
+    return lines.join('\n')
+  }
+
+  /** Open the hyperlink under a transcript position, when one exists. */
+  private tryOpenLinkAt(fullscreen: NonNullable<TUI['fullscreen']>, pos: MousePosition): void {
+    const scrollTop = fullscreen.viewport.scrollInfo().linesAbove
+    const windowHeight = fullscreen.viewport.windowHeight()
+    if (pos.row < scrollTop || pos.row >= scrollTop + windowHeight) return
+    const line = this.renderScrollArea(fullscreen)[pos.row]
+    if (!line) return
+    const url = findHyperlinkAt(line, pos.col)
+    if (url) this.terminal.openLink(url)
+  }
+
+  /** Render the scroll-area components into transcript rows. */
+  private renderScrollArea(fullscreen: NonNullable<TUI['fullscreen']>): string[] {
+    const width = this.terminal.columns
+    const transcript: string[] = []
+    for (const component of fullscreen.scroll) {
+      transcript.push(...component.render(width))
+    }
+    return transcript
   }
 
   private static readonly SEGMENT_RESET = '\x1b[0m\x1b]8;;\x07'
@@ -572,11 +702,7 @@ export class TUI extends Container {
     const width = this.terminal.columns
     const height = this.terminal.rows
 
-    const transcript: string[] = []
-    for (const component of fullscreen.scroll) {
-      const componentLines = component.render(width)
-      transcript.push(...componentLines)
-    }
+    const transcript = this.renderScrollArea(fullscreen)
     const dock = fullscreen.dock.render(width)
 
     let frame = fullscreen.viewport.composeFrame(transcript, dock, height)
@@ -591,6 +717,19 @@ export class TUI extends Container {
       if (row >= 0 && row < frame.length && labelWidth <= width) {
         const col = Math.floor((width - labelWidth) / 2)
         frame[row] = this.compositeLineAt(frame[row], `\x1b[7m${label}\x1b[27m`, col, labelWidth, width)
+      }
+    }
+    const selection = this.selection
+    if (selection) {
+      const scrollTop = fullscreen.viewport.scrollInfo().linesAbove
+      const windowHeight = fullscreen.viewport.windowHeight()
+      const [selStart, selEnd] = orderedSelection(selection.anchor, selection.focus)
+      for (let row = selStart.row; row <= selEnd.row; row++) {
+        const frameRow = row - scrollTop
+        if (frameRow < 0 || frameRow >= windowHeight || frameRow >= frame.length) continue
+        const from = row === selStart.row ? selStart.col : 0
+        const to = row === selEnd.row ? selEnd.col + 1 : width
+        frame[frameRow] = highlightColumnRange(frame[frameRow], from, to)
       }
     }
     const cursorPos = this.extractCursorPosition(frame, height)

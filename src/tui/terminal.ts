@@ -2,6 +2,7 @@
 // process.stdin/stdout: alternate screen, Kitty keyboard query, bracketed
 // paste, SGR mouse mode-sets, and resize handling.
 
+import { spawn } from 'node:child_process'
 import { setKittyProtocolActive } from './keys.js'
 import { StdinBuffer } from './stdin-buffer.js'
 
@@ -57,6 +58,12 @@ export interface Terminal {
 
   // Set the terminal window title
   setTitle(title: string): void
+
+  // Write text to the system clipboard (OSC 52; no-op when unsupported)
+  copyToClipboard(text: string): void
+
+  // Open a URL in the system browser
+  openLink(url: string): void
 }
 
 /**
@@ -355,5 +362,24 @@ export class ProcessTerminal implements Terminal {
   setTitle(title: string): void {
     // OSC 0;title BEL — set terminal window title
     process.stdout.write(`\x1b]0;${title}\x07`)
+  }
+
+  copyToClipboard(text: string): void {
+    // OSC 52 — the only channel an application has to write the system
+    // clipboard from inside a terminal. Terminals that refuse it ignore it.
+    this.write(`\x1b]52;c;${Buffer.from(text, 'utf8').toString('base64')}\x07`)
+  }
+
+  openLink(url: string): void {
+    // Delegate to the OS browser opener; failures are ignored so a dead
+    // opener never tears down the TUI.
+    const opener: [string, string[]] =
+      process.platform === 'darwin'
+        ? ['open', [url]]
+        : process.platform === 'win32'
+          ? ['cmd', ['/c', 'start', '', url]]
+          : ['xdg-open', [url]]
+    const [command, args] = opener
+    spawn(command, args, { stdio: 'ignore', detached: true }).unref()
   }
 }

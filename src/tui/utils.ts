@@ -1196,3 +1196,134 @@ export function extractSegments(
 
   return { before, beforeWidth, after, afterWidth }
 }
+
+/**
+ * Wrap the visible column range [from, to) of a line in inverse video, for
+ * mouse-drag selection highlighting. ANSI codes outside the range are kept;
+ * codes inside the range apply normally on top of the inverse attribute.
+ * Column indices are 0-based terminal columns; wide characters spanning the
+ * boundary are highlighted whole.
+ */
+export function highlightColumnRange(line: string, from: number, to: number): string {
+  const start = Math.max(0, from)
+  const end = Math.max(start, to)
+  if (start === end) return line
+
+  let result = ''
+  let currentCol = 0
+  let pendingAnsi = ''
+  let inverseOn = false
+  let i = 0
+  const extractAnsi = createAnsiCodeExtractor(line)
+
+  while (i < line.length) {
+    const ansi = extractAnsi(i)
+    if (ansi) {
+      if (currentCol >= start && currentCol < end) {
+        result += ansi.code
+      } else {
+        pendingAnsi += ansi.code
+      }
+      i += ansi.length
+      continue
+    }
+
+    let textEnd = i
+    while (textEnd < line.length && !extractAnsi(textEnd)) textEnd++
+
+    for (const { segment } of segmenter.segment(line.slice(i, textEnd))) {
+      const w = graphemeWidth(segment)
+      if (w === 0) {
+        if (pendingAnsi) {
+          result += pendingAnsi
+          pendingAnsi = ''
+        }
+        result += segment
+        continue
+      }
+      if (pendingAnsi) {
+        result += pendingAnsi
+        pendingAnsi = ''
+      }
+      const segStart = currentCol
+      const segEnd = currentCol + w
+      if (segEnd <= start || segStart >= end) {
+        result += segment
+      } else {
+        if (!inverseOn) {
+          result += '\x1b[7m'
+          inverseOn = true
+        }
+        result += segment
+        if (segEnd >= end) {
+          result += '\x1b[27m'
+          inverseOn = false
+        }
+      }
+      currentCol = segEnd
+    }
+    i = textEnd
+  }
+
+  if (pendingAnsi) {
+    result += pendingAnsi
+  }
+  if (inverseOn) {
+    result += '\x1b[27m'
+  }
+  return result
+}
+
+/**
+ * Return the OSC 8 hyperlink URL covering the given visible column of a line,
+ * or null when the column is not inside a hyperlink. Column is 0-based.
+ */
+export function findHyperlinkAt(line: string, col: number): string | null {
+  if (!line.includes('\x1b]8;')) return null
+
+  let currentCol = 0
+  let linkUrl: string | null = null
+  let linkStartCol = 0
+  let i = 0
+  const extractAnsi = createAnsiCodeExtractor(line)
+
+  while (i < line.length) {
+    const ansi = extractAnsi(i)
+    if (ansi) {
+      if (ansi.code.startsWith('\x1b]8;')) {
+        // Payload is "params;url" between OSC 8 and its ST (ESC\ or BEL)
+        const payload = ansi.code.slice(4, -2)
+        const sep = payload.indexOf(';')
+        const url = (sep === -1 ? payload : payload.slice(sep + 1)).trim()
+        if (url) {
+          linkUrl = url
+          linkStartCol = currentCol
+        } else if (linkUrl && col >= linkStartCol && col < currentCol) {
+          return linkUrl
+        } else {
+          linkUrl = null
+        }
+      }
+      i += ansi.length
+      continue
+    }
+
+    let textEnd = i
+    while (textEnd < line.length && !extractAnsi(textEnd)) textEnd++
+
+    for (const { segment } of segmenter.segment(line.slice(i, textEnd))) {
+      const w = graphemeWidth(segment)
+      if (linkUrl && col >= linkStartCol && col < currentCol + w) {
+        return linkUrl
+      }
+      currentCol += w
+    }
+    i = textEnd
+  }
+
+  // Unterminated link that runs to the end of the line
+  if (linkUrl && col >= linkStartCol && col < currentCol) {
+    return linkUrl
+  }
+  return null
+}

@@ -2,6 +2,7 @@
 // fullscreen enter/exit, and the boot screen, driven through a fake terminal.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { Transcript } from './boot/transcript.js'
 import { createBootScreen } from './boot/screen.js'
 import { Text } from './components/text.js'
 import { FakeTerminal } from './fake-terminal.js'
@@ -213,5 +214,92 @@ describe('resize handling', () => {
     await flushRender()
     expect(term.output.length).toBeGreaterThan(baseline)
     expect(boot.tui.isFullscreen()).toBe(true)
+  })
+})
+
+describe('mouse interaction', () => {
+  /** Fullscreen with a single wrapped transcript block and a one-line dock. */
+  async function startTranscript(text: string): Promise<{ term: FakeTerminal; tui: TUI }> {
+    const term = new FakeTerminal(80, 24)
+    const transcript = new Transcript()
+    transcript.addUser(text)
+    const tui = new TUI(term)
+    tui.enterFullscreen({ scroll: [transcript], dock: new Text('> ', 0, 0) })
+    tui.start()
+    await flushRender()
+    return { term, tui }
+  }
+
+  it('scrolls the transcript with the mouse wheel', async () => {
+    // 2000 chars wrap to 27 rows in a 23-row window: maxScroll = 4
+    const { term, tui } = await startTranscript('x'.repeat(2000))
+    expect(tui.getScrollInfo()?.linesAbove).toBe(4)
+    expect(tui.getScrollInfo()?.following).toBe(true)
+
+    term.emitInput('\x1b[<64;20;10M') // wheel up
+    await flushRender()
+    expect(tui.getScrollInfo()?.linesAbove).toBe(1)
+
+    term.emitInput('\x1b[<64;20;10M') // wheel up again (clamped at top)
+    await flushRender()
+    expect(tui.getScrollInfo()?.linesAbove).toBe(0)
+    expect(tui.getScrollInfo()?.following).toBe(false)
+
+    term.emitInput('\x1b[<65;20;10M') // wheel down
+    await flushRender()
+    term.emitInput('\x1b[<65;20;10M') // wheel down back to bottom
+    await flushRender()
+    expect(tui.getScrollInfo()?.linesAbove).toBe(4)
+    expect(tui.getScrollInfo()?.following).toBe(true)
+  })
+
+  it('selects by drag and copies the selection via OSC 52', async () => {
+    const { term, tui } = await startTranscript('hello world')
+    // The row renders as "You: hello world"; "hello" spans cols 5..9.
+    term.emitInput('\x1b[<0;6;1M') // press at (6,1) -> col 5
+    await flushRender()
+    term.emitInput('\x1b[<32;10;1M') // drag to (10,1) -> col 9
+    await flushRender()
+    expect(term.output).toContain('\x1b[7m') // inverse-video highlight rendered
+
+    const before = term.output.length
+    term.emitInput('\x1b[<0;10;1m') // release at (10,1)
+    await flushRender()
+    expect(term.clipboard).toBe('hello')
+    // Selection is cleared after release; the repaint carries no highlight
+    expect(term.output.slice(before)).not.toContain('\x1b[7m')
+  })
+
+  it('opens a hyperlink on click', async () => {
+    const line = '\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\'
+    const { term, tui } = await startTranscript(`see ${line} here`)
+    // Layout: "You: " (5 cols, 0..4), then "see " (5..8), then "link" (9..12).
+    term.emitInput('\x1b[<0;10;1M') // press on col 9 — inside "link"
+    await flushRender()
+    term.emitInput('\x1b[<0;10;1m') // release — a click
+    await flushRender()
+    expect(term.lastOpenedLink).toBe('https://example.com')
+  })
+
+  it('does not open a link when clicking plain text', async () => {
+    const { term, tui } = await startTranscript('no links here')
+    term.emitInput('\x1b[<0;30;1M')
+    await flushRender()
+    term.emitInput('\x1b[<0;30;1m')
+    await flushRender()
+    expect(term.lastOpenedLink).toBeNull()
+    expect(term.clipboard).toBe('')
+  })
+
+  it('ignores clicks on the dock (below the transcript window)', async () => {
+    const { term, tui } = await startTranscript('hello world')
+    term.emitInput('\x1b[<0;5;24M') // press on the last screen row (dock)
+    await flushRender()
+    term.emitInput('\x1b[<0;5;24m')
+    await flushRender()
+    expect(term.clipboard).toBe('')
+    expect(term.lastOpenedLink).toBeNull()
+    // Mouse reports never reach the focused input component
+    expect(stripAnsi(term.output)).toContain('hello world')
   })
 })
