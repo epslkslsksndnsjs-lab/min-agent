@@ -312,19 +312,41 @@ describe('tool block expansion', () => {
     boot.tui.requestRender()
     await flushRender()
     expect(boot.transcript.getToolsExpanded()).toBe(false)
-    expect(stripAnsi(term.output)).toContain('Tool: read_file (ctrl+o to expand)')
+    expect(stripAnsi(term.output)).toContain('read_file')
+    expect(stripAnsi(term.output)).toContain('(ctrl+o to expand)')
 
     term.emitInput('\x0f') // ctrl+o
     await flushRender()
     expect(boot.transcript.getToolsExpanded()).toBe(true)
-    expect(stripAnsi(term.output)).toContain('  contents')
+    expect(stripAnsi(term.output)).toContain('result: contents')
     const before = term.output.length
 
     term.emitInput('\x0f') // ctrl+o — collapse again
     await flushRender()
     expect(boot.transcript.getToolsExpanded()).toBe(false)
     // The repaint no longer writes the result body
-    expect(stripAnsi(term.output.slice(before))).not.toContain('  contents')
+    expect(stripAnsi(term.output.slice(before))).not.toContain('result: contents')
+  })
+
+  it('expands a single tool block on header click', async () => {
+    const { term, boot } = await startBoot()
+    boot.transcript.addTool('read_file', { path: '/x' })
+    boot.transcript.setToolResult('contents')
+    boot.tui.requestRender()
+    await flushRender()
+    // Header renders 4 rows at 80 cols, so the tool header sits on screen row 4 (1-based y = 5).
+    term.emitInput('\x1b[<0;5;5M') // press on the tool header
+    await flushRender()
+    term.emitInput('\x1b[<0;5;5m') // release -> click
+    await flushRender()
+    expect(boot.transcript.getBlocks()[0]).toMatchObject({ expanded: true })
+    expect(stripAnsi(term.output)).toContain('result: contents')
+    // Click again collapses it
+    term.emitInput('\x1b[<0;5;5M')
+    await flushRender()
+    term.emitInput('\x1b[<0;5;5m')
+    await flushRender()
+    expect(boot.transcript.getBlocks()[0]).toMatchObject({ expanded: false })
   })
 
   it('keeps the scroll position while expanding and collapsing', async () => {

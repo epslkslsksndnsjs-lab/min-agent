@@ -2,10 +2,10 @@ import { Input } from '../components/input.js'
 import { getKeybindings } from '../keybindings.js'
 import { TUI } from '../tui.js'
 import type { Terminal } from '../terminal.js'
+import { advanceToolPulse, Transcript } from './transcript.js'
 import { Footer } from './footer.js'
 import { InputDock } from './dock.js'
 import { Header } from './header.js'
-import { Transcript } from './transcript.js'
 
 export interface BootScreenOptions {
   /** Model id shown in the header (may be undefined before config is known). */
@@ -42,6 +42,7 @@ export function createBootScreen(terminal: Terminal, options: BootScreenOptions)
 
   const tui = new TUI(terminal)
   tui.setFocus(input)
+  footer.setRequestRender(() => tui.requestRender())
   tui.enterFullscreen({ scroll: [header, transcript], dock })
 
   // Expand-all toggle for collapsible tool blocks. Handled at the boot layer
@@ -53,6 +54,25 @@ export function createBootScreen(terminal: Terminal, options: BootScreenOptions)
       return { consume: true }
     }
     return undefined
+  })
+
+  // Click a tool block's header to expand/collapse just that block.
+  tui.onTranscriptClick = (component, localLine) => {
+    if (component !== transcript) return
+    const index = transcript.getToolBlockIndexAtLine(localLine)
+    if (index !== null) {
+      transcript.toggleToolExpanded(index)
+      tui.requestRender()
+    }
+  }
+
+  // Animate running-tool markers until every tool settles.
+  tui.addPulseSource(() => {
+    if (transcript.hasRunning()) {
+      advanceToolPulse()
+      return true
+    }
+    return false
   })
 
   return { tui, transcript, input, footer }

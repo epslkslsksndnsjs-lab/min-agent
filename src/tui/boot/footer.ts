@@ -1,49 +1,113 @@
 import type { Component } from '../tui.js'
+import type { AgentEvent } from '../../agent.js'
 import { styleText } from './theme.js'
+import {
+  AGENT_ACTIVITY_LABELS,
+  AgentActivityTracker,
+  formatTokenCount,
+  formatWorkingElapsed,
+} from './agent-activity.js'
 
 /**
- * Run-status line rendered above the input dock. Shows `↓ {tokens} tokens ·
- * {elapsed}` once the agent starts streaming; before that it returns no rows so
- * the input prompt sits at the bottom of the screen.
+ * Run-status line rendered above the input dock. Mirrors @mycode/mycode-tui:
+ * the line is empty while idle (waiting) and, while the agent is active, shows
+ * an animated spinner plus `Activity · elapsed · ↓/↑ tokens tokens` so the user
+ * can always tell whether the run is alive or stuck. Tokens reset per turn and
+ * use the compact `1.2k` formatter; the arrow points down while receiving
+ * (thinking/writing) and up while a tool is executing.
  */
 
-/** Format a token count with thousands separators, e.g. 12345 -> "12,345". */
-export function formatTokens(tokens: number): string {
-  return tokens.toLocaleString('en-US')
-}
-
-/** Format elapsed milliseconds as mm:ss, or h:mm:ss past an hour. */
-export function formatElapsed(ms: number): string {
-  const total = Math.max(0, Math.floor(ms / 1000))
-  const h = Math.floor(total / 3600)
-  const m = Math.floor((total % 3600) / 60)
-  const s = total % 60
-  const pad = (n: number): string => String(n).padStart(2, '0')
-  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`
-}
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+const SPINNER_INTERVAL_MS = 80
 
 export class Footer implements Component {
-  private tokens = 0
-  private elapsedMs = 0
+  private readonly tracker = new AgentActivityTracker()
   private active = false
+  private workingStartedAt = 0
+  private spinnerFrame = 0
+  private animTimer: ReturnType<typeof setInterval> | undefined
+  private requestRender: () => void = () => {}
 
-  setTokens(tokens: number): void {
-    this.tokens = tokens
-    this.active = true
+  /** Wire the render callback used to advance the spinner animation. */
+  setRequestRender(fn: () => void): void {
+    this.requestRender = fn
   }
 
-  setElapsed(ms: number): void {
-    this.elapsedMs = ms
+  /** Begin a turn: reset per-turn state, show "thinking", start the spinner. */
+  startTurn(): void {
+    this.tracker.reset()
+    this.workingStartedAt = Date.now()
     this.active = true
+    this.startSpinner()
+  }
+
+  /** Feed one agent event into the activity tracker. */
+  feed(ev: AgentEvent): void {
+    // A new user message starts a fresh turn.
+    if (ev.type === 'user_interject') {
+      this.startTurn()
+      return
+    }
+    // If the status line was idle (after turn_end or before the first submit),
+    // the first produced event opens a new turn so the spinner reappears.
+    if (!this.active && (ev.type === 'tool_call' || ev.type === 'assistant_text')) {
+      this.startTurn()
+    }
+    switch (ev.type) {
+      case 'assistant_text':
+        this.tracker.onWriting(ev.delta.length)
+        break
+      case 'tool_call':
+        this.tracker.onExecutingStart()
+        break
+      case 'tool_result':
+        this.tracker.onExecutingEnd()
+        break
+      case 'usage':
+        this.tracker.setAuthoritative(ev.usage.completionTokens)
+        break
+      case 'turn_end':
+        break
+    }
+  }
+
+  /** End of turn: fold tokens and hide the line until the next turn starts. */
+  endTurn(): void {
+    this.tracker.onTurnEnd()
+    this.active = false
+    this.stopSpinner()
   }
 
   invalidate(): void {
-    // No cached state to invalidate currently
+    // No cached state to invalidate; the line is recomputed on each render.
+  }
+
+  private startSpinner(): void {
+    this.stopSpinner()
+    this.animTimer = setInterval(() => {
+      this.spinnerFrame = (this.spinnerFrame + 1) % SPINNER_FRAMES.length
+      this.requestRender()
+    }, SPINNER_INTERVAL_MS)
+  }
+
+  private stopSpinner(): void {
+    if (this.animTimer) {
+      clearInterval(this.animTimer)
+      this.animTimer = undefined
+    }
   }
 
   render(_width: number): string[] {
     if (!this.active) return []
-    const line = `↓ ${formatTokens(this.tokens)} tokens · ${formatElapsed(this.elapsedMs)}`
-    return [styleText('muted', line)]
+    const status = this.tracker.getStatus()
+    const elapsed = formatWorkingElapsed(Date.now() - this.workingStartedAt)
+    const arrow = status.direction === 'down' ? '↓' : '↑'
+    const tokenPart = status.tokens > 0 ? `${arrow} ${formatTokenCount(status.tokens)} tokens` : ''
+    const parts = [AGENT_ACTIVITY_LABELS[status.activity]]
+    if (tokenPart) parts.push(tokenPart)
+    parts.push(elapsed)
+    const line = parts.join(' · ')
+    const spinner = SPINNER_FRAMES[this.spinnerFrame % SPINNER_FRAMES.length]
+    return [styleText('accent', `${spinner} `) + styleText('muted', line)]
   }
 }

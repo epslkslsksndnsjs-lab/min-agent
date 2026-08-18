@@ -179,6 +179,11 @@ export class TUI extends Container {
   private preserveViewportOnNextRender = false // One-shot: repaint the visible viewport in place
   private stopped = false
   private selection: MouseSelection | null = null
+  /** Click on a scroll-area row, wired by the boot layer to expand tool blocks. */
+  onTranscriptClick?: (component: Component, localLine: number) => void
+  /** Sources that report whether an animation is still active; drives the pulse timer. */
+  private pulseSources = new Set<() => boolean>()
+  private pulseTimer: NodeJS.Timeout | undefined
 
   private fullscreen: {
     viewport: FullscreenViewport
@@ -186,6 +191,7 @@ export class TUI extends Container {
     dock: Component
     mouse: boolean
     viewportControls: boolean
+    scrollBounds: { component: Component; start: number; end: number }[]
     inlineState: {
       previousLines: string[]
       previousWidth: number
@@ -270,6 +276,34 @@ export class TUI extends Container {
     this.inputListeners.delete(listener)
   }
 
+  /**
+   * Register a source that advances an animation frame and reports whether it
+   * is still active. While any source is active the TUI repaints on a ~4Hz
+   * cadence so in-progress indicators (e.g. a running tool's pulsing marker)
+   * animate without coupling the engine to any specific component.
+   */
+  addPulseSource(source: () => boolean): () => void {
+    this.pulseSources.add(source)
+    if (this.pulseSources.size > 0) this.ensurePulseTimer()
+    return () => {
+      this.pulseSources.delete(source)
+    }
+  }
+
+  private ensurePulseTimer(): void {
+    if (this.stopped || this.pulseTimer) return
+    this.pulseTimer = setInterval(() => {
+      let active = false
+      for (const source of this.pulseSources) {
+        if (source()) active = true
+      }
+      if (!active) {
+        clearInterval(this.pulseTimer)
+        this.pulseTimer = undefined
+      }
+    }, 250)
+  }
+
   stop(options: TuiStopOptions = {}): void {
     const preserveAltScreen = options.preserveAltScreen === true && this.terminal.altScreenActive
     this.exitFullscreen({ flush: !preserveAltScreen, leaveAltScreen: !preserveAltScreen })
@@ -277,6 +311,10 @@ export class TUI extends Container {
     if (this.renderTimer) {
       clearTimeout(this.renderTimer)
       this.renderTimer = undefined
+    }
+    if (this.pulseTimer) {
+      clearInterval(this.pulseTimer)
+      this.pulseTimer = undefined
     }
     // Move the cursor to the end of the content to prevent overwriting/artifacts on exit
     if (!preserveAltScreen && this.previousLines.length > 0) {
@@ -299,6 +337,7 @@ export class TUI extends Container {
   }
 
   requestRender(force = false): void {
+    this.ensurePulseTimer()
     if (force) {
       this.fullscreen?.viewport.reset()
       // Keep the previous frame metadata so the forced full repaint can clean
@@ -355,6 +394,7 @@ export class TUI extends Container {
       dock: options.dock,
       mouse: options.mouse !== false,
       viewportControls: options.viewportControls !== false,
+      scrollBounds: [],
       inlineState: {
         previousLines: this.previousLines,
         previousWidth: this.previousWidth,
@@ -557,6 +597,11 @@ export class TUI extends Container {
     const isClick = start.row === end.row && start.col === end.col
     if (isClick) {
       if (pos) this.tryOpenLinkAt(fullscreen, pos)
+      if (pos && this.onTranscriptClick) {
+        const bounds = fullscreen.scrollBounds
+        const hit = bounds.find((b) => pos.row >= b.start && pos.row < b.end)
+        if (hit) this.onTranscriptClick(hit.component, pos.row - hit.start)
+      }
     } else {
       const text = this.selectionText(fullscreen, start, end)
       if (text) this.terminal.copyToClipboard(text)
@@ -610,9 +655,14 @@ export class TUI extends Container {
   private renderScrollArea(fullscreen: NonNullable<TUI['fullscreen']>): string[] {
     const width = this.terminal.columns
     const transcript: string[] = []
+    const bounds: { component: Component; start: number; end: number }[] = []
     for (const component of fullscreen.scroll) {
-      transcript.push(...component.render(width))
+      const start = transcript.length
+      const lines = component.render(width)
+      transcript.push(...lines)
+      bounds.push({ component, start, end: transcript.length })
     }
+    fullscreen.scrollBounds = bounds
     return transcript
   }
 

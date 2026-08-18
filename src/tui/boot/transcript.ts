@@ -1,7 +1,7 @@
 import type { Component } from '../tui.js'
 import { getKeybindings } from '../keybindings.js'
-import { truncateToWidth, wrapTextWithAnsi } from '../utils.js'
-import { styleText } from './theme.js'
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '../utils.js'
+import { bg, styleText } from './theme.js'
 
 /**
  * Transcript block — one entry in the role-labeled conversation list.
@@ -11,14 +11,56 @@ import { styleText } from './theme.js'
 export type TranscriptBlock =
   | { kind: 'user'; text: string }
   | { kind: 'assistant'; text: string }
-  | { kind: 'tool'; name: string; args: unknown; result: string | null; expanded: boolean }
+  | { kind: 'tool'; name: string; args: unknown; result: string | null; expanded: boolean; status: ToolStatus }
   | { kind: 'raw'; line: string }
+
+export type ToolStatus = 'queued' | 'running' | 'done' | 'error'
+
+// Status glyphs shown in front of the status word, like the upstream tool
+// marker: a pulsing diamond while running, a green check on success, a red
+// cross on failure, a dim dot while still queued.
+const WORKING_ICON_FRAMES = ['◇', '◈', '◆', '◈'] as const
+
+let pulseFrame = 0
+/** Advance the running-tool animation frame (called by the render ticker). */
+export function advanceToolPulse(): void {
+  pulseFrame = (pulseFrame + 1) % WORKING_ICON_FRAMES.length
+}
+
+// Tool panel geometry — left/right padding inside the panel background.
+const PANEL_PAD = 2
+
+function toolPanelLine(line: string, width: number): string {
+  const contentWidth = Math.max(1, width - PANEL_PAD * 2)
+  const truncated = truncateToWidth(line, contentWidth, '')
+  const padding = ' '.repeat(Math.max(0, contentWidth - visibleWidth(truncated)))
+  const sidePad = ' '.repeat(PANEL_PAD)
+  return bg('toolPanelBg', `${sidePad}${truncated}${padding}${sidePad}`)
+}
+
+function statusSegment(status: ToolStatus): string {
+  switch (status) {
+    case 'queued':
+      return styleText('muted', 'queued')
+    case 'running':
+      return styleText('bashMode', `${WORKING_ICON_FRAMES[pulseFrame]} running`)
+    case 'done':
+      return styleText('success', 'done')
+    case 'error':
+      return styleText('error', 'error')
+  }
+}
+
+function expandHint(): string {
+  const key = getKeybindings().getKeys('tui.tools.expand')[0] ?? 'ctrl+o'
+  return styleText('dim', `(${key} to expand)`)
+}
 
 /**
  * Transcript component — a role-labeled block list (You / Assistant / Tool)
  * rendered as wrapped rows. Assistant text streams into a single open block
  * until a user message, a tool call, or an explicit endTurn closes it.
- * Tool blocks are collapsible: collapsed they show only the title line, so a
+ * Tool blocks are collapsible: collapsed they show only the status header so a
  * long result does not drown the conversation; the expand-all toggle flips
  * every tool block at once.
  */
@@ -27,6 +69,8 @@ export class Transcript implements Component {
   private streamingAssistant: number | null = null // index of the open assistant block
   private lastToolIndex: number | null = null
   private toolsExpanded = false // expand-all state; new tool blocks inherit it
+  /** Global transcript line -> tool block index, rebuilt every render (header rows only). */
+  private lineToBlock = new Map<number, number>()
 
   /** Append a user message block. */
   addUser(text: string): void {
@@ -50,16 +94,33 @@ export class Transcript implements Component {
   /** Append a tool-call block; closes any open Assistant block. */
   addTool(name: string, args?: unknown): void {
     this.closeStreaming()
-    this.blocks.push({ kind: 'tool', name, args: args ?? null, result: null, expanded: this.toolsExpanded })
+    this.blocks.push({ kind: 'tool', name, args: args ?? null, result: null, expanded: this.toolsExpanded, status: 'running' })
     this.lastToolIndex = this.blocks.length - 1
   }
 
-  /** Attach a tool result to the last tool block. */
-  setToolResult(result: string): void {
+  /** Attach a tool result to the last tool block and settle its status. */
+  setToolResult(result: string, isError = result.startsWith('error:')): void {
     const block = this.lastToolIndex !== null ? this.blocks[this.lastToolIndex] : null
     if (block?.kind === 'tool') {
       block.result = result
+      block.status = isError ? 'error' : 'done'
     }
+  }
+
+  /** Whether any tool block is still running (drives the render ticker). */
+  hasRunning(): boolean {
+    return this.blocks.some((b) => b.kind === 'tool' && b.status === 'running')
+  }
+
+  /** Tool block index at a global transcript line, or null when not a header row. */
+  getToolBlockIndexAtLine(globalLine: number): number | null {
+    return this.lineToBlock.get(globalLine) ?? null
+  }
+
+  /** Toggle a single tool block's expanded state. */
+  toggleToolExpanded(index: number): void {
+    const block = this.blocks[index]
+    if (block?.kind === 'tool') block.expanded = !block.expanded
   }
 
   /** Whether new tool blocks start expanded (the expand-all state). */
@@ -105,6 +166,7 @@ export class Transcript implements Component {
     this.blocks = []
     this.streamingAssistant = null
     this.lastToolIndex = null
+    this.lineToBlock.clear()
   }
 
   getBlocks(): readonly TranscriptBlock[] {
@@ -122,7 +184,10 @@ export class Transcript implements Component {
 
   render(width: number): string[] {
     const lines: string[] = []
-    for (const block of this.blocks) {
+    this.lineToBlock.clear()
+    for (let bi = 0; bi < this.blocks.length; bi++) {
+      const block = this.blocks[bi]
+      const startLine = lines.length
       switch (block.kind) {
         case 'raw':
           lines.push(block.line)
@@ -134,8 +199,12 @@ export class Transcript implements Component {
           this.renderLabeled('Assistant: ', block.text, width, lines)
           break
         case 'tool':
-          this.renderTool(block, width, lines)
+          this.renderTool(block, bi, width, lines)
           break
+      }
+      // First line of a tool block is its status header — map it for click-to-toggle.
+      if (block.kind === 'tool' && lines.length > startLine) {
+        this.lineToBlock.set(startLine, bi)
       }
     }
     return lines
@@ -158,33 +227,46 @@ export class Transcript implements Component {
   }
 
   private renderTool(
-    block: { name: string; args: unknown; result: string | null; expanded: boolean },
+    block: { name: string; args: unknown; result: string | null; expanded: boolean; status: ToolStatus },
+    index: number,
     width: number,
     out: string[],
   ): void {
-    // Collapsed blocks show only the title plus the toggle hint, so long
-    // results stay out of the way until the user asks for them.
-    const title = styleText('bold', 'Tool: ') + block.name
+    const header = styleText('muted', block.name) + styleText('dim', ' · ') + statusSegment(block.status)
+
     if (!block.expanded) {
-      const expandKey = getKeybindings().getKeys('tui.tools.expand')[0] ?? 'ctrl+o'
-      out.push(truncateToWidth(title + ' ' + styleText('dim', `(${expandKey} to expand)`), width))
+      // Only the latest tool block carries the expand hint — others stay terse.
+      const isLatest = index === this.blocks.length - 1
+      const hint = isLatest ? ` ${expandHint()}` : ''
+      out.push(toolPanelLine(truncateToWidth(header + hint, width - PANEL_PAD * 2), width))
       return
     }
-    out.push(truncateToWidth(title, width))
+
+    out.push(toolPanelLine(truncateToWidth(header, width - PANEL_PAD * 2), width))
+    out.push(toolPanelLine('', width))
     const indent = '  '
     if (block.args !== null && block.args !== undefined) {
-      this.renderIndented(JSON.stringify(block.args), indent, width, out)
+      this.renderIndented(`args: ${this.formatValue(block.args)}`, indent, width, out)
     }
     if (block.result !== null) {
-      this.renderIndented(block.result, indent, width, out)
+      this.renderIndented(`result: ${block.result}`, indent, width, out)
+    }
+  }
+
+  private formatValue(value: unknown): string {
+    if (typeof value === 'string') return value
+    try {
+      return JSON.stringify(value)
+    } catch {
+      return String(value)
     }
   }
 
   private renderIndented(text: string, indent: string, width: number, out: string[]): void {
-    const contentWidth = Math.max(1, width - indent.length)
+    const contentWidth = Math.max(1, width - PANEL_PAD * 2 - indent.length)
     const wrapped = wrapTextWithAnsi(text, contentWidth)
     for (const line of wrapped) {
-      out.push(indent + truncateToWidth(line, contentWidth))
+      out.push(toolPanelLine(indent + truncateToWidth(line, contentWidth), width))
     }
   }
 }

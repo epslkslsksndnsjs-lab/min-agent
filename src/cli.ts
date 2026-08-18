@@ -3,6 +3,7 @@
 // it and keeps the CLI wiring (user input -> agent loop -> TUI -> persist).
 
 import { runAgent } from './agent.js'
+import { runAgentFake } from './run-agent-fake.js'
 import { builtinTools } from './tools.js'
 import { loadSession, persistSession } from './session.js'
 import type { Model, Context } from './llm.js'
@@ -91,6 +92,9 @@ async function main() {
 
   const tools = builtinTools()
 
+  // Stress-test stand-in: emit a synthetic event stream instead of calling a model.
+  const useFake = process.env.MIN_AGENT_FAKE === '1' || model.model === 'abc'
+
   const terminal = new ProcessTerminal()
   const boot = createBootScreen(terminal, {
     model: model.model,
@@ -123,7 +127,10 @@ async function main() {
     context.messages.push({ role: 'user', content: text })
     ctrl = new AbortController()
     try {
-      for await (const ev of runAgent(model, context, tools, ctrl.signal)) {
+      const source = useFake
+        ? runAgentFake(ctrl.signal)
+        : runAgent(model, context, tools, ctrl.signal)
+      for await (const ev of source) {
         if (ev.type === 'turn_end' && ev.stopReason === 'max_tokens') {
           adapter.handle({ type: 'assistant_text', delta: '\n[output truncated by max_tokens]' })
         }

@@ -18,6 +18,7 @@ export type AgentEvent =
   | { type: 'tool_call'; id: string; name: string; args: unknown }
   | { type: 'tool_result'; id: string; name: string; result: string }
   | { type: 'usage'; usage: { promptTokens: number; completionTokens: number; totalTokens: number } }
+  | { type: 'user_interject'; text: string }
   | { type: 'turn_end'; stopReason: 'end_turn' | 'max_tokens' | 'aborted' | 'error' }
 
 /** Compaction threshold: compact old messages once count exceeds this */

@@ -3,7 +3,7 @@
 // no UI logic lives here.
 
 import type { AgentEvent } from '../agent.js'
-import { TokenTracker, type Message } from '../llm.js'
+import { type Message } from '../llm.js'
 import { Transcript } from './boot/transcript.js'
 import type { Footer } from './boot/footer.js'
 import type { Input } from './components/input.js'
@@ -12,14 +12,10 @@ import type { Input } from './components/input.js'
  * Thin adapter connecting the agent event stream to the UI.
  * `handle` maps each event to transcript state, then invokes the render
  * callback so the UI repaints (render coalescing is the TUI's job).
- * When a footer is provided, token usage (estimate + authoritative) and the
- * elapsed time of the current turn are reported to it.
+ * When a footer is provided, the event stream also drives its activity
+ * tracker (status line: thinking/executing/writing + tokens + elapsed).
  */
 export class AgentEventAdapter {
-  private readonly tokenTracker = new TokenTracker()
-  private turnStartedAt = 0
-  private elapsedTimer: ReturnType<typeof setInterval> | undefined
-
   constructor(
     private readonly transcript: Transcript,
     private readonly requestRender: () => void,
@@ -31,10 +27,8 @@ export class AgentEventAdapter {
   submit(text: string): void {
     this.transcript.addUser(text)
     this.input?.setValue('')
-    this.turnStartedAt = Date.now()
-    this.updateFooter()
+    this.footer?.startTurn()
     this.requestRender()
-    this.startElapsedTicker()
   }
 
   /** Map one agent event to transcript state and request a render. */
@@ -43,51 +37,25 @@ export class AgentEventAdapter {
       case 'assistant_text':
         // Streams into its own Assistant block (no separate thinking stage)
         this.transcript.appendAssistant(ev.delta)
-        this.tokenTracker.addChars(ev.delta.length)
         break
       case 'tool_call':
         this.transcript.addTool(ev.name, ev.args)
         break
       case 'tool_result':
-        this.transcript.setToolResult(ev.result)
+        this.transcript.setToolResult(ev.result, ev.result.startsWith('error:'))
+        break
+      case 'user_interject':
+        this.transcript.addUser(ev.text)
         break
       case 'usage':
-        this.tokenTracker.setAuthoritative(ev.usage.totalTokens)
         break
       case 'turn_end':
         this.transcript.endTurn()
-        this.stopElapsedTicker()
+        this.footer?.endTurn()
         break
     }
-    this.updateFooter()
+    this.footer?.feed(ev)
     this.requestRender()
-  }
-
-  /**
-   * Keep the elapsed timer advancing during long stretches without stream
-   * events (e.g. the model's think delay), so the footer clock does not freeze
-   * between deltas. The token estimate still updates on each event.
-   */
-  private startElapsedTicker(): void {
-    this.stopElapsedTicker()
-    this.elapsedTimer = setInterval(() => {
-      if (this.turnStartedAt > 0) this.updateFooter()
-    }, 250)
-  }
-
-  private stopElapsedTicker(): void {
-    if (this.elapsedTimer) {
-      clearInterval(this.elapsedTimer)
-      this.elapsedTimer = undefined
-    }
-  }
-
-  private updateFooter(): void {
-    if (!this.footer) return
-    this.footer.setTokens(this.tokenTracker.reported)
-    if (this.turnStartedAt > 0) {
-      this.footer.setElapsed(Date.now() - this.turnStartedAt)
-    }
   }
 }
 
@@ -114,7 +82,7 @@ export function hydrateTranscript(messages: readonly Message[], transcript = new
           transcript.addTool(block.name, block.input)
           break
         case 'tool_result':
-          transcript.setToolResult(block.content)
+          transcript.setToolResult(block.content, block.content.startsWith('error:'))
           break
       }
     }

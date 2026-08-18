@@ -43,12 +43,16 @@ describe('Transcript role-labeled blocks', () => {
     expect(t.getBlocks()).toHaveLength(2)
   })
 
-  it('renders tool blocks collapsed by default with the expand hint', () => {
+  it('renders tool blocks collapsed with the name, status, and expand hint', () => {
     const t = new Transcript()
     t.addTool('read_file', { path: '/tmp/x' })
     t.setToolResult('contents')
-    expect(t.getBlocks()).toMatchObject([{ kind: 'tool', name: 'read_file', expanded: false }])
-    expect(t.render(80).map(stripAnsi)).toEqual(['Tool: read_file (ctrl+o to expand)'])
+    expect(t.getBlocks()).toMatchObject([{ kind: 'tool', name: 'read_file', expanded: false, status: 'done' }])
+    const lines = t.render(80).map(stripAnsi)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toContain('read_file')
+    expect(lines[0]).toContain('done')
+    expect(lines[0]).toContain('(ctrl+o to expand)')
   })
 
   it('expands all tool blocks and renders args and result', () => {
@@ -56,11 +60,11 @@ describe('Transcript role-labeled blocks', () => {
     t.addTool('read_file', { path: '/tmp/x' })
     t.setToolResult('contents')
     t.setToolsExpanded(true)
-    expect(t.render(80).map(stripAnsi)).toEqual([
-      'Tool: read_file',
-      '  {"path":"/tmp/x"}',
-      '  contents',
-    ])
+    const lines = t.render(80).map(stripAnsi)
+    expect(lines[0]).toContain('read_file')
+    expect(lines[0]).toContain('done')
+    expect(lines.some((l) => l.includes('args:'))).toBe(true)
+    expect(lines.some((l) => l.includes('result: contents'))).toBe(true)
   })
 
   it('collapses all tool blocks again via setToolsExpanded(false)', () => {
@@ -69,7 +73,10 @@ describe('Transcript role-labeled blocks', () => {
     t.setToolResult('contents')
     t.setToolsExpanded(true)
     t.setToolsExpanded(false)
-    expect(t.render(80).map(stripAnsi)).toEqual(['Tool: read_file (ctrl+o to expand)'])
+    const lines = t.render(80).map(stripAnsi)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toContain('read_file')
+    expect(lines[0]).toContain('(ctrl+o to expand)')
   })
 
   it('toggles the expand-all state across every tool block', () => {
@@ -101,7 +108,9 @@ describe('Transcript role-labeled blocks', () => {
     const t = new Transcript()
     t.addTool('read_file')
     t.setToolsExpanded(true)
-    expect(t.render(80).map(stripAnsi)).toEqual(['Tool: read_file'])
+    const lines = t.render(80).map(stripAnsi)
+    expect(lines[0]).toContain('read_file')
+    expect(lines.some((l) => l.includes('args:'))).toBe(false)
   })
 
   it('keeps the tool result attached to the last tool block', () => {
@@ -113,6 +122,24 @@ describe('Transcript role-labeled blocks', () => {
     expect(blocks).toHaveLength(2)
     expect(blocks[1]).toMatchObject({ kind: 'tool', name: 'b', result: 'result for b' })
     expect(blocks[0]).toMatchObject({ kind: 'tool', name: 'a', result: null })
+  })
+
+  it('tracks the four tool statuses (running -> done / error)', () => {
+    const t = new Transcript()
+    t.addTool('a')
+    expect(t.getBlocks()[0]).toMatchObject({ kind: 'tool', status: 'running' })
+    t.setToolResult('ok')
+    expect(t.getBlocks()[0]).toMatchObject({ status: 'done' })
+
+    const t2 = new Transcript()
+    t2.addTool('b')
+    expect(t2.getBlocks()[0]).toMatchObject({ status: 'running' })
+    t2.setToolResult('error: boom')
+    expect(t2.getBlocks()[0]).toMatchObject({ status: 'error' })
+
+    const lines = t2.render(80).map(stripAnsi)
+    expect(lines[0]).toContain('b')
+    expect(lines[0]).toContain('error')
   })
 
   it('wraps long assistant text and indents continuation lines', () => {

@@ -49,12 +49,12 @@ describe('AgentEventAdapter', () => {
     const rendered = stripAnsi(term.output)
     expect(rendered).toContain('Assistant: Hello')
     // Tool blocks render collapsed; the result stays hidden until expanded
-    expect(rendered).toContain('Tool: read_file')
+    expect(rendered).toContain('read_file')
     expect(rendered).not.toContain('data')
     boot.transcript.setToolsExpanded(true)
     boot.tui.requestRender()
     await flushRender()
-    expect(stripAnsi(term.output)).toContain('data')
+    expect(stripAnsi(term.output)).toContain('result: data')
   })
 
   it('streams assistant deltas into one block and opens a new one after a tool round', async () => {
@@ -97,20 +97,48 @@ describe('AgentEventAdapter', () => {
     expect(stripAnsi(term.output)).toContain('You: hi')
   })
 
-  it('reports the character estimate, authoritative usage, and elapsed time to the footer', async () => {
+  it('reports the activity, compact token estimate, and elapsed time to the footer', async () => {
     const { boot } = await startBoot()
     const adapter = new AgentEventAdapter(boot.transcript, () => boot.tui.requestRender(), boot.input, boot.footer)
 
     adapter.submit('hi')
     adapter.handle({ type: 'assistant_text', delta: 'abcdefgh' }) // 8 chars -> estimate 2
-    expect(stripAnsi(boot.footer.render(80)[0])).toMatch(/↓ 2 tokens · 00:00/)
+    const line = stripAnsi(boot.footer.render(80)[0])
+    expect(line).toContain('Writing')
+    expect(line).toContain('↓ 2 tokens')
+    expect(line).toContain('0s')
 
     vi.advanceTimersByTime(65_000)
     adapter.handle({ type: 'assistant_text', delta: 'x' })
-    expect(stripAnsi(boot.footer.render(80)[0])).toContain('01:05')
+    expect(stripAnsi(boot.footer.render(80)[0])).toContain('1m 05s')
 
     adapter.handle({ type: 'usage', usage: { promptTokens: 10, completionTokens: 40, totalTokens: 50 } })
     expect(stripAnsi(boot.footer.render(80)[0])).toContain('↓ 50 tokens')
+    adapter.handle({ type: 'turn_end', stopReason: 'end_turn' })
+  })
+
+  it('shows the Executing state with an up arrow while a tool runs', async () => {
+    const { boot } = await startBoot()
+    const adapter = new AgentEventAdapter(boot.transcript, () => boot.tui.requestRender(), boot.input, boot.footer)
+    adapter.submit('hi')
+    adapter.handle({ type: 'assistant_text', delta: 'abcdefgh' }) // 2 tokens
+    adapter.handle({ type: 'tool_call', id: 't1', name: 'read_file', args: {} })
+    const line = stripAnsi(boot.footer.render(80)[0])
+    expect(line).toContain('Executing')
+    expect(line).toContain('↑ 2 tokens')
+    adapter.handle({ type: 'tool_result', id: 't1', name: 'read_file', result: 'ok' })
+    expect(stripAnsi(boot.footer.render(80)[0])).toContain('Thinking')
+    adapter.handle({ type: 'turn_end', stopReason: 'end_turn' })
+  })
+
+  it('hides the footer while idle (before the first submit / after turn_end)', async () => {
+    const { boot } = await startBoot()
+    const adapter = new AgentEventAdapter(boot.transcript, () => boot.tui.requestRender(), boot.input, boot.footer)
+    expect(boot.footer.render(80)).toEqual([])
+    adapter.submit('hi')
+    adapter.handle({ type: 'assistant_text', delta: 'hi' })
+    adapter.handle({ type: 'turn_end', stopReason: 'end_turn' })
+    expect(boot.footer.render(80)).toEqual([])
   })
 })
 
@@ -131,7 +159,11 @@ describe('hydrateTranscript', () => {
     ]
     const t = hydrateTranscript(messages)
     t.setToolsExpanded(true)
-    expect(t.render(80).map(stripAnsi)).toEqual(['Tool: read_file', '  {"path":"/x"}', '  data'])
+    const lines = t.render(80).map(stripAnsi)
+    expect(lines[0]).toContain('read_file')
+    expect(lines[0]).toContain('done')
+    expect(lines.some((l) => l.includes('args: {"path":"/x"}'))).toBe(true)
+    expect(lines.some((l) => l.includes('result: data'))).toBe(true)
   })
 
   it('attaches a tool result to the tool block that precedes it', () => {
