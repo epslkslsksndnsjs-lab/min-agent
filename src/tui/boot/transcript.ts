@@ -1,6 +1,7 @@
 import type { Component } from '../tui.js'
 import { getKeybindings } from '../keybindings.js'
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '../utils.js'
+import { Markdown } from './markdown.js'
 import { bg, styleText } from './theme.js'
 
 /**
@@ -11,7 +12,7 @@ import { bg, styleText } from './theme.js'
 export type TranscriptBlock =
   | { kind: 'user'; text: string }
   | { kind: 'assistant'; text: string }
-  | { kind: 'tool'; name: string; args: unknown; result: string | null; expanded: boolean; status: ToolStatus }
+  | { kind: 'tool'; id: string | null; name: string; args: unknown; result: string | null; expanded: boolean; status: ToolStatus }
   | { kind: 'raw'; line: string }
 
 export type ToolStatus = 'queued' | 'running' | 'done' | 'error'
@@ -36,6 +37,13 @@ function toolPanelLine(line: string, width: number): string {
   const padding = ' '.repeat(Math.max(0, contentWidth - visibleWidth(truncated)))
   const sidePad = ' '.repeat(PANEL_PAD)
   return bg('toolPanelBg', `${sidePad}${truncated}${padding}${sidePad}`)
+}
+
+// User-sent message: white text on a full-width warm-yellow panel.
+function userLine(content: string, width: number): string {
+  const visibleLen = visibleWidth(content)
+  const padding = ' '.repeat(Math.max(0, width - visibleLen))
+  return '\x1b[97m' + bg('userMsgBg', content + padding)
 }
 
 function statusSegment(status: ToolStatus): string {
@@ -92,9 +100,9 @@ export class Transcript implements Component {
   }
 
   /** Append a tool-call block; closes any open Assistant block. */
-  addTool(name: string, args?: unknown): void {
+  addTool(name: string, args?: unknown, id?: string): void {
     this.closeStreaming()
-    this.blocks.push({ kind: 'tool', name, args: args ?? null, result: null, expanded: this.toolsExpanded, status: 'running' })
+    this.blocks.push({ kind: 'tool', id: id ?? null, name, args: args ?? null, result: null, expanded: this.toolsExpanded, status: 'running' })
     this.lastToolIndex = this.blocks.length - 1
   }
 
@@ -104,6 +112,18 @@ export class Transcript implements Component {
     if (block?.kind === 'tool') {
       block.result = result
       block.status = isError ? 'error' : 'done'
+    }
+  }
+
+  /** Attach a tool result to the tool block with the matching id and settle its status. */
+  setToolResultById(id: string, result: string, isError = result.startsWith('error:')): void {
+    for (let i = this.blocks.length - 1; i >= 0; i--) {
+      const block = this.blocks[i]
+      if (block.kind === 'tool' && block.id === id) {
+        block.result = result
+        block.status = isError ? 'error' : 'done'
+        return
+      }
     }
   }
 
@@ -193,10 +213,10 @@ export class Transcript implements Component {
           lines.push(block.line)
           break
         case 'user':
-          this.renderLabeled('You: ', block.text, width, lines)
+          this.renderUser(block.text, width, lines)
           break
         case 'assistant':
-          this.renderLabeled('Assistant: ', block.text, width, lines)
+          this.renderAssistant(block.text, width, lines)
           break
         case 'tool':
           this.renderTool(block, bi, width, lines)
@@ -210,20 +230,26 @@ export class Transcript implements Component {
     return lines
   }
 
-  private renderLabeled(label: string, text: string, width: number, out: string[]): void {
-    const labelStyled = styleText('bold', label)
-    const labelWidth = label.length
-    if (!text) {
-      out.push(truncateToWidth(labelStyled, width))
-      return
-    }
-    const contentWidth = Math.max(1, width - labelWidth)
-    const wrapped = wrapTextWithAnsi(text, contentWidth)
-    out.push(truncateToWidth(labelStyled + wrapped[0], width))
+  private renderUser(text: string, width: number, out: string[]): void {
+    const label = '\x1b[1mYou: \x1b[22m'
+    const labelWidth = visibleWidth(label)
+    const contentWidth = Math.max(1, width - 2)
+    const textWidth = Math.max(1, contentWidth - labelWidth)
+    const wrapped = wrapTextWithAnsi(text, textWidth)
+    out.push(userLine(label + (wrapped[0] ?? ''), width))
     const indent = ' '.repeat(labelWidth)
     for (const line of wrapped.slice(1)) {
-      out.push(truncateToWidth(indent + line, width))
+      out.push(userLine(indent + line, width))
     }
+  }
+
+  private renderAssistant(text: string, width: number, out: string[]): void {
+    if (!text) {
+      out.push('')
+      return
+    }
+    const md = new Markdown(text)
+    for (const line of md.render(width)) out.push(line)
   }
 
   private renderTool(

@@ -2,13 +2,24 @@
 // Agent main loop: stream the LLM reply -> execute tool_calls -> feed results back into Context,
 // until the model stops calling tools (end_turn / max_tokens) or is interrupted (aborted / error).
 
-import { stream, buildAssistantMessage, buildToolResultMessage, type Model, type Context } from './llm.js'
+import {
+  stream,
+  buildAssistantMessage,
+  buildToolResultMessage,
+  resolveRetryPolicy,
+  isRetryableAssistantError,
+  getRetryDelayMs,
+  retrySleep,
+  type Model,
+  type Context,
+  type RetryPolicy,
+} from './llm.js'
 
 /** Tool definition: name + description + JSON Schema params + execute function */
 export type AgentTool = {
   name: string
   description: string
-  parameters: object  // JSON Schema
+  input_schema: object  // JSON Schema
   execute: (args: unknown, signal?: AbortSignal) => Promise<string>
 }
 
@@ -20,51 +31,7 @@ export type AgentEvent =
   | { type: 'usage'; usage: { promptTokens: number; completionTokens: number; totalTokens: number } }
   | { type: 'user_interject'; text: string }
   | { type: 'turn_end'; stopReason: 'end_turn' | 'max_tokens' | 'aborted' | 'error' }
-
-/** Compaction threshold: compact old messages once count exceeds this */
-const COMPACT_THRESHOLD = 50
-/** Number of recent messages to keep during compaction */
-const KEEP_RECENT = 20
-
-/**
- * Conversation compaction: when messages exceed the threshold, ask the LLM to
- * summarize the old ones and replace them with the summary, so the context
- * stays within the model's window.
- */
-async function compactContext(model: Model, context: Context, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) return  // Don't compact on abort — avoid corrupting context with an empty summary
-  if (context.messages.length < COMPACT_THRESHOLD) return
-
-  const oldMessages = context.messages.slice(0, -KEEP_RECENT)
-  const recentMessages = context.messages.slice(-KEEP_RECENT)
-
-  // Serialize old messages to plain text for the LLM to summarize
-  const conversationText = oldMessages
-    .map(m => `${m.role}: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`)
-    .join('\n')
-
-  // Collect the summary from a single stream call
-  const summaryContext: Context = {
-    systemPrompt: 'Summarize the following conversation into a concise context summary, preserving key decisions, completed work, and pending items.',
-    messages: [{ role: 'user', content: conversationText }],
-  }
-
-  let summary = ''
-  let failed = false
-  for await (const ev of stream(model, summaryContext, { signal })) {
-    if (ev.type === 'text_delta') summary += ev.delta
-    else if (ev.type === 'error' || ev.type === 'done' && ev.stopReason === 'aborted') { failed = true; break }
-  }
-
-  // On compaction failure, keep the original messages — safer than an empty summary
-  if (failed || !summary) return
-
-  // Replace old messages with the summary, keeping recent ones
-  context.messages = [
-    { role: 'user', content: `[context summary]\n${summary}` },
-    ...recentMessages,
-  ]
-}
+  | { type: 'retry'; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
 
 /**
  * Run the agent loop.
@@ -79,20 +46,29 @@ export async function* runAgent(
   context: Context,
   tools: AgentTool[],
   signal?: AbortSignal,
+  retry: RetryPolicy = resolveRetryPolicy(),
 ): AsyncGenerator<AgentEvent> {
   const toolMap = new Map(tools.map(t => [t.name, t]))
-  const toolDefs = tools.map(t => ({ name: t.name, description: t.description, parameters: t.parameters }))
+  const toolDefs = tools.map(t => ({ name: t.name, description: t.description, input_schema: t.input_schema }))
+
+  // Per-turn retry budget for restarting the assistant call on transient
+  // errors. Mirrors pi's retryAssistantCall (the message-level retry).
+  let attempt = 0
+  // When the turn is restarted we disable the stream's own HTTP retries so the
+  // two layers don't multiply the attempt count.
+  const streamRetryForRetry = (): RetryPolicy => ({ enabled: false, maxRetries: 0, baseDelayMs: retry.baseDelayMs, maxRetryDelayMs: retry.maxRetryDelayMs })
 
   while (true) {
-    // Compact first so the LLM call below sees bounded history
-    await compactContext(model, context, signal)
 
     // Stream the LLM call, collecting text and tool_calls
     let text = ''
     let stopReason: 'end_turn' | 'tool_use' | 'max_tokens' | 'aborted' = 'end_turn'
     const toolCalls: { id: string; name: string; args: unknown }[] = []
 
-    for await (const ev of stream(model, context, { tools: toolDefs, signal })) {
+    const streamRetry = attempt === 0 ? retry : streamRetryForRetry()
+    let shouldRetryTurn = false
+    let retryDelayMs = 0
+    for await (const ev of stream(model, context, { tools: toolDefs, signal, retry: streamRetry })) {
       if (ev.type === 'text_delta') {
         text += ev.delta
         yield { type: 'assistant_text', delta: ev.delta }
@@ -104,17 +80,43 @@ export async function* runAgent(
       } else if (ev.type === 'done') {
         stopReason = ev.stopReason
         if (ev.stopReason === 'aborted') {
-          // On abort, drop tool_calls (missing tool_result would error the API after session restore)
+          // On abort, drop tool_calls (missing tool_result would error the API)
           context.messages.push(buildAssistantMessage(text, []))
           yield { type: 'turn_end', stopReason: 'aborted' }
           return
         }
       } else if (ev.type === 'error') {
-        context.messages.push(buildAssistantMessage(text, []))
-        yield { type: 'assistant_text', delta: `\n[error] ${ev.error.message}` }
-        yield { type: 'turn_end', stopReason: 'error' }
-        return
+      // Restart the assistant turn on a transient error only when no partial
+      // output was produced (the error came from an exhausted HTTP retry, not a
+      // mid-stream break — re-streaming would duplicate output). Mirrors pi's
+      // retryAssistantCall. Mid-stream errors are surfaced and end the turn.
+      if (text.length === 0 && attempt < retry.maxRetries && isRetryableAssistantError(ev.error.message)) {
+        const delayMs = getRetryDelayMs(undefined, attempt, retry.baseDelayMs, retry.maxRetryDelayMs)
+        yield { type: 'retry', attempt: attempt + 1, maxAttempts: retry.maxRetries, delayMs, errorMessage: ev.error.message }
+        try { await retrySleep(delayMs, signal) } catch {
+          // aborted during backoff — end the turn as aborted
+        }
+        if (signal?.aborted) {
+          yield { type: 'turn_end', stopReason: 'aborted' }
+          return
+        }
+        attempt++
+        shouldRetryTurn = true
+        break
       }
+      context.messages.push(buildAssistantMessage(text, []))
+      yield { type: 'assistant_text', delta: `\n[error] ${ev.error.message}` }
+      yield { type: 'turn_end', stopReason: 'error' }
+      return
+    }
+    }
+
+    // The assistant turn was restarted on a transient error above: re-enter the
+    // while loop to re-stream the call with HTTP retries disabled so the two
+    // retry layers don't multiply the attempt count. Mirrors pi's
+    // retryAssistantCall re-invoking produce().
+    if (shouldRetryTurn) {
+      continue
     }
 
     // Push the assistant reply back into context

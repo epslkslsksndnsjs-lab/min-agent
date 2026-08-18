@@ -5,11 +5,14 @@ import { describe, it, expect } from 'vitest'
 import { Transcript } from './boot/transcript.js'
 import { stripAnsi } from './utils.js'
 
+// Strip ANSI and trailing whitespace (lines are padded to full width).
+const clean = (s: string) => stripAnsi(s).trim()
+
 describe('Transcript role-labeled blocks', () => {
   it('renders a user block with the You label', () => {
     const t = new Transcript()
     t.addUser('hello')
-    expect(t.render(80).map(stripAnsi)).toEqual(['You: hello'])
+    expect(t.render(80).map(clean)).toEqual(['You: hello'])
   })
 
   it('streams assistant text into a single block across deltas', () => {
@@ -18,7 +21,8 @@ describe('Transcript role-labeled blocks', () => {
     t.appendAssistant('lo ')
     t.appendAssistant('world')
     expect(t.getBlocks()).toHaveLength(1)
-    expect(t.render(80).map(stripAnsi)).toEqual(['Assistant: Hello world'])
+    // Assistant text renders as Markdown without an "Assistant: " prefix.
+    expect(t.render(80).map(clean)).toEqual(['Hello world'])
   })
 
   it('starts a fresh assistant block after a user turn', () => {
@@ -27,11 +31,11 @@ describe('Transcript role-labeled blocks', () => {
     t.appendAssistant('one')
     t.addUser('again')
     t.appendAssistant('two')
-    expect(t.render(80).map(stripAnsi)).toEqual([
+    expect(t.render(80).map(clean)).toEqual([
       'You: hi',
-      'Assistant: one',
+      'one',
       'You: again',
-      'Assistant: two',
+      'two',
     ])
   })
 
@@ -124,6 +128,24 @@ describe('Transcript role-labeled blocks', () => {
     expect(blocks[0]).toMatchObject({ kind: 'tool', name: 'a', result: null })
   })
 
+  it('matches tool results to their id, not just the last block (batched tool calls)', () => {
+    const t = new Transcript()
+    t.addTool('a', undefined, 'id-a')
+    t.addTool('b', undefined, 'id-b')
+    t.setToolResultById('id-a', 'result a')
+    t.setToolResultById('id-b', 'result b')
+    const blocks = t.getBlocks()
+    expect(blocks[0]).toMatchObject({ kind: 'tool', name: 'a', result: 'result a', status: 'done' })
+    expect(blocks[1]).toMatchObject({ kind: 'tool', name: 'b', result: 'result b', status: 'done' })
+  })
+
+  it('marks a tool error by id', () => {
+    const t = new Transcript()
+    t.addTool('a', undefined, 'id-a')
+    t.setToolResultById('id-a', 'error: boom')
+    expect(t.getBlocks()[0]).toMatchObject({ kind: 'tool', name: 'a', status: 'error' })
+  })
+
   it('tracks the four tool statuses (running -> done / error)', () => {
     const t = new Transcript()
     t.addTool('a')
@@ -142,15 +164,13 @@ describe('Transcript role-labeled blocks', () => {
     expect(lines[0]).toContain('error')
   })
 
-  it('wraps long assistant text and indents continuation lines', () => {
+  it('wraps long assistant text across multiple lines', () => {
     const t = new Transcript()
     t.appendAssistant(Array.from({ length: 12 }, (_, i) => `w${i}`).join(' '))
-    const lines = t.render(20).map(stripAnsi)
+    const lines = t.render(20).map(clean)
     expect(lines.length).toBeGreaterThan(1)
-    expect(lines[0]).toMatch(/^Assistant: /)
-    for (const line of lines.slice(1)) {
-      expect(line.startsWith(' '.repeat('Assistant: '.length))).toBe(true)
-    }
+    // Assistant text renders as Markdown, no "Assistant: " prefix.
+    expect(lines[0]).toMatch(/^w0/)
   })
 
   it('keeps legacy raw lines working', () => {

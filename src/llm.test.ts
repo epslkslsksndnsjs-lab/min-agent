@@ -8,9 +8,15 @@ import {
   contextToOpenAIMessages,
   estimateTokens,
   TokenTracker,
+  isRetryableAssistantError,
+  formatProviderError,
+  isRetryableProviderStatus,
+  getRetryDelayMs,
+  retrySleep,
   type Model,
   type Context,
   type StreamEvent,
+  type Message,
 } from './llm.js'
 import { collect } from './test-utils.js'
 
@@ -53,31 +59,38 @@ describe('contextToOpenAIMessages', () => {
     expect(contextToOpenAIMessages(ctx)).toEqual([{ role: 'user', content: 'hello' }])
   })
 
-  it('converts assistant text + tool_use blocks into content + tool_calls', () => {
+  it('converts assistant text + tool_use blocks into content + tool_calls (with its tool_result)', () => {
     const ctx: Context = {
-      messages: [{
-        role: 'assistant',
-        content: [
-          { type: 'text', text: 'sure' },
-          { type: 'tool_use', id: 'c1', name: 'read_file', input: { path: '/x' } },
-        ],
-      }],
-    }
-    expect(contextToOpenAIMessages(ctx)).toEqual([{
-      role: 'assistant',
-      content: 'sure',
-      tool_calls: [{ id: 'c1', type: 'function', function: { name: 'read_file', arguments: '{"path":"/x"}' } }],
-    }])
-  })
-
-  it('emits a separate role:tool message for tool_result blocks', () => {
-    const ctx: Context = {
-      messages: [{
-        role: 'user',
-        content: [{ type: 'tool_result', tool_use_id: 'c1', content: 'file data' }],
-      }],
+      messages: [
+        {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'sure' },
+            { type: 'tool_use', id: 'c1', name: 'read_file', input: { path: '/x' } },
+          ],
+        },
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'c1', content: 'ok' }] },
+      ],
     }
     expect(contextToOpenAIMessages(ctx)).toEqual([
+      {
+        role: 'assistant',
+        content: 'sure',
+        tool_calls: [{ id: 'c1', type: 'function', function: { name: 'read_file', arguments: '{"path":"/x"}' } }],
+      },
+      { role: 'tool', tool_call_id: 'c1', content: 'ok' },
+    ])
+  })
+
+  it('emits a separate role:tool message for a tool_result that follows an assistant', () => {
+    const ctx: Context = {
+      messages: [
+        { role: 'assistant', content: [{ type: 'tool_use', id: 'c1', name: 'read_file', input: {} }] },
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'c1', content: 'file data' }] },
+      ],
+    }
+    expect(contextToOpenAIMessages(ctx)).toEqual([
+      { role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'read_file', arguments: '{}' } }] },
       { role: 'tool', tool_call_id: 'c1', content: 'file data' },
     ])
   })
@@ -93,6 +106,7 @@ describe('contextToOpenAIMessages', () => {
     expect(m.content).toBeNull()
   })
 })
+
 
 // --- stream parsing ------------------------------------------------------
 
@@ -208,6 +222,180 @@ describe('stream — SSE parsing', () => {
       { type: 'text_delta', delta: 'x' },
       { type: 'done', stopReason: 'end_turn' },
     ])
+  })
+})
+
+// --- error classification (copied from pi: retry.ts / error-body.ts / provider-retry.ts) ---
+
+describe('error classification (pi retry.ts)', () => {
+  it('treats quota/billing exhaustion as non-retryable', () => {
+    expect(isRetryableAssistantError('insufficient_quota')).toBe(false)
+    expect(isRetryableAssistantError('Error: out of budget')).toBe(false)
+    expect(isRetryableAssistantError('Monthly usage limit reached')).toBe(false)
+    expect(isRetryableAssistantError('billing problem')).toBe(false)
+  })
+
+  it('treats transient HTTP/transport errors as retryable', () => {
+    expect(isRetryableAssistantError('API 429: rate limit')).toBe(true)
+    expect(isRetryableAssistantError('API 500: internal error')).toBe(true)
+    expect(isRetryableAssistantError('fetch failed')).toBe(true)
+    expect(isRetryableAssistantError('network error: connection refused')).toBe(true)
+    expect(isRetryableAssistantError('stream ended before message_stop')).toBe(true)
+    expect(isRetryableAssistantError('please retry your request')).toBe(true)
+  })
+
+  it('treats empty messages as non-retryable', () => {
+    expect(isRetryableAssistantError(undefined)).toBe(false)
+    expect(isRetryableAssistantError('')).toBe(false)
+  })
+})
+
+describe('formatProviderError (pi error-body.ts)', () => {
+  it('formats status + body', () => {
+    expect(formatProviderError(429, 'rate limit', 'RateLimitError')).toBe('API 429: rate limit')
+  })
+  it('falls back to status + message when body is empty', () => {
+    expect(formatProviderError(500, '', 'Server Error')).toBe('API 500: Server Error')
+  })
+  it('falls back to the raw message when there is no status', () => {
+    expect(formatProviderError(undefined, undefined, 'fetch failed')).toBe('fetch failed')
+  })
+})
+
+describe('isRetryableProviderStatus (pi provider-retry.ts)', () => {
+  it('retries 408/409/429 and 5xx, but not other 4xx', () => {
+    expect(isRetryableProviderStatus(408, undefined)).toBe(true)
+    expect(isRetryableProviderStatus(429, undefined)).toBe(true)
+    expect(isRetryableProviderStatus(503, undefined)).toBe(true)
+    expect(isRetryableProviderStatus(400, undefined)).toBe(false)
+    expect(isRetryableProviderStatus(404, undefined)).toBe(false)
+  })
+  it('retries an undefined status (network failure)', () => {
+    expect(isRetryableProviderStatus(undefined, undefined)).toBe(true)
+  })
+  it('honors the x-should-retry header', () => {
+    expect(isRetryableProviderStatus(400, new Headers({ 'x-should-retry': 'true' }))).toBe(true)
+    expect(isRetryableProviderStatus(200, new Headers({ 'x-should-retry': 'false' }))).toBe(false)
+  })
+})
+
+describe('getRetryDelayMs (pi provider-retry.ts)', () => {
+  it('prefers the retry-after-ms header', () => {
+    expect(getRetryDelayMs(new Headers({ 'retry-after-ms': '50' }), 0, 1000, undefined)).toBe(50)
+  })
+  it('parses the retry-after header as seconds', () => {
+    expect(getRetryDelayMs(new Headers({ 'retry-after': '2' }), 0, 1000, undefined)).toBe(2000)
+  })
+  it('falls back to exponential backoff capped by maxRetryDelayMs', () => {
+    const d = getRetryDelayMs(undefined, 0, 1000, 10)
+    expect(d).toBeGreaterThan(0)
+    expect(d).toBeLessThanOrEqual(10)
+  })
+})
+
+// --- stream request retry (pi provider-retry.ts) ------------------------
+
+describe('stream — request retry (pi provider-retry.ts)', () => {
+  const retry = { enabled: true, maxRetries: 2, baseDelayMs: 1, maxRetryDelayMs: 1000 }
+
+  it('retries a 429 then succeeds', async () => {
+    const fetchMock = vi.fn()
+    fetchMock.mockResolvedValueOnce(sseResponse('', { status: 429, statusText: 'Too Many Requests' }))
+    fetchMock.mockResolvedValueOnce(sseResponse(sseBody(
+      { choices: [{ delta: { content: 'ok' } }] },
+      { choices: [{ delta: {}, finish_reason: 'stop' }] },
+    )))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const events = await collect(stream(model, { messages: [] }, { retry }))
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(events.some((e) => e.type === 'retry')).toBe(true)
+    expect(events[events.length - 1]).toEqual({ type: 'done', stopReason: 'end_turn' })
+  })
+
+  it('exhausts retries on a persistent 500 and emits an error', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(sseResponse('', { status: 500 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const events = await collect(stream(model, { messages: [] }, { retry }))
+    expect(fetchMock).toHaveBeenCalledTimes(3) // initial + 2 retries
+    expect(events[events.length - 1].type).toBe('error')
+    expect(events.filter((e) => e.type === 'retry')).toHaveLength(2)
+  })
+
+  it('does not retry a non-retryable 400', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(sseResponse('', { status: 400 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const events = await collect(stream(model, { messages: [] }, { retry }))
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(events.some((e) => e.type === 'retry')).toBe(false)
+    expect(events[events.length - 1].type).toBe('error')
+  })
+
+  it('retries a network failure (fetch throws) then succeeds', async () => {
+    const fetchMock = vi.fn()
+    fetchMock.mockRejectedValueOnce(new Error('fetch failed'))
+    fetchMock.mockResolvedValueOnce(sseResponse(sseBody(
+      { choices: [{ delta: { content: 'ok' } }] },
+      { choices: [{ delta: {}, finish_reason: 'stop' }] },
+    )))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const events = await collect(stream(model, { messages: [] }, { retry }))
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(events[events.length - 1]).toEqual({ type: 'done', stopReason: 'end_turn' })
+  })
+
+  it('does not retry when the policy is disabled', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(sseResponse('', { status: 429 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const disabled = { enabled: false, maxRetries: 2, baseDelayMs: 1 }
+
+    const events = await collect(stream(model, { messages: [] }, { retry: disabled }))
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(events[events.length - 1].type).toBe('error')
+  })
+
+  it('yields an error (never throws) when the server requests a delay over the cap', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        sseResponse('', { status: 429, statusText: 'Too Many Requests', headers: { 'retry-after-ms': '99999999' } }),
+      )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const events = await collect(
+      stream(model, { messages: [] }, { retry: { enabled: true, maxRetries: 2, baseDelayMs: 1, maxRetryDelayMs: 1000 } }),
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(1) // no retry after the hard failure
+    expect(events.filter((e) => e.type === 'retry')).toHaveLength(0)
+    const last = events[events.length - 1]
+    expect(last.type).toBe('error')
+    expect((last as { error: Error }).error.message).toMatch(/retry delay/)
+  })
+})
+
+// --- retrySleep ----------------------------------------------------------
+
+describe('retrySleep (pi retry.ts)', () => {
+  it('resolves after the delay and removes its abort listener', async () => {
+    const listeners = new Set<() => void>()
+    const signal = {
+      aborted: false,
+      addEventListener: (_type: string, fn: () => void) => listeners.add(fn),
+      removeEventListener: (_type: string, fn: () => void) => listeners.delete(fn),
+    } as unknown as AbortSignal
+
+    await retrySleep(1, signal)
+    expect(listeners.size).toBe(0)
+  })
+
+  it('rejects when aborted during the sleep', async () => {
+    const ac = new AbortController()
+    const sleeping = retrySleep(10_000, ac.signal)
+    ac.abort()
+    await expect(sleeping).rejects.toThrow()
   })
 })
 

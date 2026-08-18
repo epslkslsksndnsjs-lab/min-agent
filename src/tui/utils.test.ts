@@ -20,8 +20,8 @@ describe('visibleWidth', () => {
   })
 
   it('counts CJK as two columns', () => {
-    expect(visibleWidth('中文')).toBe(4)
-    expect(visibleWidth('a中b')).toBe(4)
+    expect(visibleWidth('\u4e2d\u6587')).toBe(4)
+    expect(visibleWidth('a\u4e2db')).toBe(4)
   })
 
   it('ignores ANSI escape codes', () => {
@@ -58,8 +58,8 @@ describe('sliceByColumn / sliceWithWidth', () => {
   })
 
   it('slices CJK by visual columns', () => {
-    expect(sliceByColumn('中文abc', 0, 4)).toBe('中文')
-    expect(sliceByColumn('中文abc', 4, 3)).toBe('abc')
+    expect(sliceByColumn('\u4e2d\u6587abc', 0, 4)).toBe('\u4e2d\u6587')
+    expect(sliceByColumn('\u4e2d\u6587abc', 4, 3)).toBe('abc')
   })
 
   it('preserves ANSI codes in the slice', () => {
@@ -69,14 +69,14 @@ describe('sliceByColumn / sliceWithWidth', () => {
   })
 
   it('returns actual width from sliceWithWidth', () => {
-    const result = sliceWithWidth('中文abc', 0, 4)
-    expect(result.text).toBe('中文')
+    const result = sliceWithWidth('\u4e2d\u6587abc', 0, 4)
+    expect(result.text).toBe('\u4e2d\u6587')
     expect(result.width).toBe(4)
   })
 
   it('excludes wide chars that would extend past the range when strict', () => {
-    // 中 spans cols 1-3; a strict slice ending at col 2 must exclude it
-    expect(sliceByColumn('a中b', 0, 2, true)).toBe('a')
+    // The CJK character spans cols 1-3; a strict slice ending at col 2 must exclude it
+    expect(sliceByColumn('a\u4e2db', 0, 2, true)).toBe('a')
   })
 })
 
@@ -90,7 +90,7 @@ describe('truncateToWidth', () => {
   })
 
   it('accounts for CJK width', () => {
-    expect(truncateToWidth('中文测试', 6)).toBe('中...')
+    expect(truncateToWidth('\u4e2d\u6587\u6d4b\u8bd5', 6)).toBe('\u4e2d...')
   })
 
   it('pads to the requested width when requested', () => {

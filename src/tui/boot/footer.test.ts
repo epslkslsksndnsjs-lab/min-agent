@@ -77,6 +77,17 @@ describe('Footer', () => {
     expect(line).toContain('↑ 2 tokens')
   })
 
+  it('estimates CJK output far higher than the old chars/4 rule', () => {
+    const footer = new Footer()
+    footer.setRequestRender(() => {})
+    footer.startTurn()
+    // 8 CJK chars: old rule gave 8/4 = 2; CJK-aware gives ~8*1.6 = 13.
+    footer.feed({ type: 'assistant_text', delta: '\u4e2d\u6587\u4e2d\u6587\u4e2d\u6587\u4e2d\u6587' })
+    const line = stripAnsi(footer.render(80)[0])
+    expect(line).toContain('Writing')
+    expect(line).toContain('↓ 13 tokens')
+  })
+
   it('hides the line again after the turn ends', () => {
     const footer = new Footer()
     footer.setRequestRender(() => {})
@@ -85,4 +96,19 @@ describe('Footer', () => {
     footer.endTurn()
     expect(footer.render(80)).toEqual([])
   })
+
+  it('keeps counting across turns instead of resetting each round', () => {
+    const footer = new Footer()
+    footer.setRequestRender(() => {})
+    footer.startTurn()
+    footer.feed({ type: 'assistant_text', delta: 'abcdefgh' }) // 2 tokens
+    footer.feed({ type: 'usage', usage: { promptTokens: 10, completionTokens: 2, totalTokens: 12 } })
+    footer.endTurn()
+    // Second turn: the running total must include the first turn's 2 tokens.
+    footer.startTurn()
+    footer.feed({ type: 'assistant_text', delta: 'abcdefgh' }) // +2 -> 4 total
+    const line = stripAnsi(footer.render(80)[0])
+    expect(line).toContain('↓ 4 tokens')
+  })
+
 })

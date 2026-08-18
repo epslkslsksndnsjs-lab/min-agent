@@ -3,9 +3,10 @@
 // many output tokens it has produced since the user's last message) from the
 // event stream, so the status line can show more than a static "Working...".
 //
-// Output tokens accumulate per turn (reset on each user message) and lean on a
-// character-based estimate between authoritative usage reports, kept monotonic
-// so the count never dips when final usage arrives.
+// Output tokens accumulate across the whole session (the per-turn count folds
+// into a running total that is never reset) and lean on a character-based
+// estimate between authoritative usage reports, kept monotonic so the count
+// never dips when final usage arrives.
 
 export type AgentActivity = 'waiting' | 'thinking' | 'writing' | 'executing'
 
@@ -17,25 +18,43 @@ export const AGENT_ACTIVITY_LABELS: Record<AgentActivity, string> = {
 }
 
 /** Fallback estimate for providers that only report usage when the message completes. */
-const CHARS_PER_TOKEN_ESTIMATE = 4
+const LATIN_CHARS_PER_TOKEN = 4
+/** Wide (CJK / full-width) characters pack ~1.6 tokens each — far denser than
+ *  Latin's ~0.25 tokens/char, so a single chars/4 rule badly undercounts CJK
+ *  output and makes the live counter look frozen until the final usage lands. */
+const WIDE_CHARS_PER_TOKEN = 1.6
+
+/** True for CJK ideographs, Kana, Hangul, CJK punctuation and full-width forms. */
+function isWideChar(ch: string): boolean {
+  const cp = ch.codePointAt(0) ?? 0
+  return (
+    (cp >= 0x2e80 && cp <= 0x9fff) || // CJK radicals, Kangxi, Hiragana, Katakana, CJK Unified
+    (cp >= 0xac00 && cp <= 0xd7af) || // Hangul syllables
+    (cp >= 0x3000 && cp <= 0x303f) || // CJK symbols and punctuation
+    (cp >= 0xff00 && cp <= 0xffef) // Full-width forms
+  )
+}
 
 export class AgentActivityTracker {
   private activity: AgentActivity = 'waiting'
+  /** Session-wide output-token total; only grows, never reset between turns. */
   private completedTokens = 0
   private streamingUsageTokens = 0
-  private streamingChars = 0
+  private streamingLatin = 0
+  private streamingWide = 0
   private runningToolCount = 0
   // Live count leans on the character estimate between authoritative usage
   // reports; keeping the reported value monotonic prevents it dipping when
   // usage arrives at message end.
   private reportedTokens = 0
 
-  /** Start of a new turn (user message): reset counters and show "thinking". */
+  /** Start of a new turn (user message): reset per-turn counters but keep the
+   *  session-wide token total so the status line counts across all rounds. */
   reset(): void {
     this.activity = 'thinking'
-    this.completedTokens = 0
     this.streamingUsageTokens = 0
-    this.streamingChars = 0
+    this.streamingLatin = 0
+    this.streamingWide = 0
     this.runningToolCount = 0
     this.reportedTokens = 0
   }
@@ -44,9 +63,14 @@ export class AgentActivityTracker {
     this.activity = 'thinking'
   }
 
-  onWriting(chars: number): void {
+  /** Account for a streamed text delta (a real substring, so wide chars can be
+   *  counted separately from Latin for a far more accurate live estimate). */
+  onWriting(delta: string): void {
     this.activity = 'writing'
-    this.streamingChars += chars
+    for (const ch of delta) {
+      if (isWideChar(ch)) this.streamingWide++
+      else this.streamingLatin++
+    }
     this.reportedTokens = Math.max(this.reportedTokens, this.currentTokens())
   }
 
@@ -70,7 +94,8 @@ export class AgentActivityTracker {
   onTurnEnd(): void {
     this.completedTokens += this.streamingUsageTokens > 0 ? this.streamingUsageTokens : this.estimatedStreamingTokens()
     this.streamingUsageTokens = 0
-    this.streamingChars = 0
+    this.streamingLatin = 0
+    this.streamingWide = 0
     this.activity = 'waiting'
   }
 
@@ -83,11 +108,17 @@ export class AgentActivityTracker {
   }
 
   private currentTokens(): number {
-    return this.completedTokens + Math.max(this.streamingUsageTokens, this.estimatedStreamingTokens())
+    // During streaming the live count tracks the character estimate so it
+    // ticks up as text arrives. The authoritative usage must NOT pin the count
+    // here: some providers emit `usage` at the *start* of the stream, and a
+    // Math.max against it would freeze the counter for the whole turn. The
+    // usage value is instead folded in as the final count at turn end
+    // (onTurnEnd), so an early usage can't stall the live display.
+    return this.completedTokens + this.estimatedStreamingTokens()
   }
 
   private estimatedStreamingTokens(): number {
-    return Math.round(this.streamingChars / CHARS_PER_TOKEN_ESTIMATE)
+    return Math.round(this.streamingLatin / LATIN_CHARS_PER_TOKEN + this.streamingWide * WIDE_CHARS_PER_TOKEN)
   }
 }
 

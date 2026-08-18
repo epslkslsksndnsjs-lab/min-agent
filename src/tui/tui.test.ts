@@ -231,14 +231,14 @@ describe('mouse interaction', () => {
   }
 
   it('scrolls the transcript with the mouse wheel', async () => {
-    // 2000 chars wrap to 27 rows in a 23-row window: maxScroll = 4
+    // 2000 chars wrap to 28 rows in a 23-row window (You: label uses 5 cols): maxScroll = 5
     const { term, tui } = await startTranscript('x'.repeat(2000))
-    expect(tui.getScrollInfo()?.linesAbove).toBe(4)
+    expect(tui.getScrollInfo()?.linesAbove).toBe(5)
     expect(tui.getScrollInfo()?.following).toBe(true)
 
     term.emitInput('\x1b[<64;20;10M') // wheel up
     await flushRender()
-    expect(tui.getScrollInfo()?.linesAbove).toBe(1)
+    expect(tui.getScrollInfo()?.linesAbove).toBe(2)
 
     term.emitInput('\x1b[<64;20;10M') // wheel up again (clamped at top)
     await flushRender()
@@ -249,7 +249,7 @@ describe('mouse interaction', () => {
     await flushRender()
     term.emitInput('\x1b[<65;20;10M') // wheel down back to bottom
     await flushRender()
-    expect(tui.getScrollInfo()?.linesAbove).toBe(4)
+    expect(tui.getScrollInfo()?.linesAbove).toBe(5)
     expect(tui.getScrollInfo()?.following).toBe(true)
   })
 

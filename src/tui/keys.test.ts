@@ -114,7 +114,7 @@ describe('isKeyRelease', () => {
 describe('decodeKittyPrintable', () => {
   it('decodes plain CSI-u printable characters', () => {
     expect(decodeKittyPrintable('\x1b[97u')).toBe('a')
-    expect(decodeKittyPrintable('\x1b[20013u')).toBe('中') // U+4E2D
+    expect(decodeKittyPrintable('\x1b[20013u')).toBe('\u4e2d') // U+4E2D
   })
 
   it('rejects control sequences', () => {

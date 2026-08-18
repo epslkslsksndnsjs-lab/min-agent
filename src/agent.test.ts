@@ -54,7 +54,7 @@ describe('runAgent — event sequence', () => {
     const tool: AgentTool = {
       name: 'read_file',
       description: 'read',
-      parameters: {},
+      input_schema: {},
       execute: async () => 'file contents',
     }
     mockStream(
@@ -120,4 +120,46 @@ describe('runAgent — event sequence', () => {
     expect(ctx.messages).toHaveLength(1)
     expect(ctx.messages[0].role).toBe('assistant')
   })
+})
+
+describe('runAgent — turn retry (pi retryAssistantCall)', () => {
+  const retry = { enabled: true, maxRetries: 2, baseDelayMs: 1 }
+
+  it('restarts the turn on a retryable error with no partial output, then succeeds', async () => {
+    mockStream(
+      [{ type: 'error', error: new Error('API 429: rate limit') }],
+      [{ type: 'text_delta', delta: 'ok' }, { type: 'done', stopReason: 'end_turn' }],
+    )
+    const ctx: Context = { messages: [] }
+    const events = await collect(runAgent(model, ctx, [], undefined, retry))
+
+    expect(events.some((e) => e.type === 'retry')).toBe(true)
+    expect(events[events.length - 1]).toEqual({ type: 'turn_end', stopReason: 'end_turn' })
+    expect(vi.mocked(stream)).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not retry a non-retryable error (quota) even with no partial output', async () => {
+    mockStream([{ type: 'error', error: new Error('insufficient_quota') }])
+    const ctx: Context = { messages: [] }
+    const events = await collect(runAgent(model, ctx, [], undefined, retry))
+
+    expect(events.some((e) => e.type === 'retry')).toBe(false)
+    expect(events[events.length - 1]).toEqual({ type: 'turn_end', stopReason: 'error' })
+    expect(vi.mocked(stream)).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not retry a mid-stream error that already produced output', async () => {
+    mockStream([
+      { type: 'text_delta', delta: 'partial' },
+      { type: 'error', error: new Error('stream ended before message_stop') },
+    ])
+    const ctx: Context = { messages: [] }
+    const events = await collect(runAgent(model, ctx, [], undefined, retry))
+
+    // text.length > 0, so a full-turn restart is skipped to avoid duplicating output.
+    expect(events.some((e) => e.type === 'retry')).toBe(false)
+    expect(events[events.length - 1]).toEqual({ type: 'turn_end', stopReason: 'error' })
+    expect(vi.mocked(stream)).toHaveBeenCalledTimes(1)
+  })
+
 })

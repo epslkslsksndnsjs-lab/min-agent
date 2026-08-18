@@ -1,5 +1,5 @@
 // Tests for src/tui/event-adapter.ts — mapping agent events to transcript
-// state, hydrating the transcript from a persisted session, and driving
+// state, hydrating the transcript from in-memory messages, and driving
 // renders through the boot screen.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -47,7 +47,7 @@ describe('AgentEventAdapter', () => {
       await flushRender()
     }
     const rendered = stripAnsi(term.output)
-    expect(rendered).toContain('Assistant: Hello')
+    expect(rendered).toContain('Hello')
     // Tool blocks render collapsed; the result stays hidden until expanded
     expect(rendered).toContain('read_file')
     expect(rendered).not.toContain('data')
@@ -112,9 +112,18 @@ describe('AgentEventAdapter', () => {
     adapter.handle({ type: 'assistant_text', delta: 'x' })
     expect(stripAnsi(boot.footer.render(80)[0])).toContain('1m 05s')
 
+    // An early `usage` must NOT pin the live count: providers that emit usage at
+    // the *start* of the stream would otherwise freeze the counter for the whole
+    // turn. The estimate keeps ticking as text arrives; the authoritative value
+    // is folded in as the turn-end total instead.
     adapter.handle({ type: 'usage', usage: { promptTokens: 10, completionTokens: 40, totalTokens: 50 } })
-    expect(stripAnsi(boot.footer.render(80)[0])).toContain('↓ 50 tokens')
+    expect(stripAnsi(boot.footer.render(80)[0])).toContain('↓ 2 tokens')
     adapter.handle({ type: 'turn_end', stopReason: 'end_turn' })
+    // The next turn's base includes the authoritative 40 from the prior turn,
+    // proving an early usage still counts without having stalled the display.
+    adapter.submit('again')
+    adapter.handle({ type: 'assistant_text', delta: 'x' })
+    expect(stripAnsi(boot.footer.render(80)[0])).toContain('↓ 40 tokens')
   })
 
   it('shows the Executing state with an up arrow while a tool runs', async () => {
@@ -149,7 +158,7 @@ describe('hydrateTranscript', () => {
       { role: 'assistant', content: 'hello there' },
     ]
     const t = hydrateTranscript(messages)
-    expect(t.render(80).map(stripAnsi)).toEqual(['You: hi', 'Assistant: hello there'])
+    expect(t.render(80).map((s) => stripAnsi(s).trim())).toEqual(['You: hi', 'hello there'])
   })
 
   it('renders tool_use / tool_result content blocks', () => {

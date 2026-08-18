@@ -7,6 +7,8 @@ import { type Message } from '../llm.js'
 import { Transcript } from './boot/transcript.js'
 import type { Footer } from './boot/footer.js'
 import type { Input } from './components/input.js'
+import { styleText } from './boot/theme.js'
+import { formatTokenCount } from './boot/agent-activity.js'
 
 /**
  * Thin adapter connecting the agent event stream to the UI.
@@ -39,13 +41,22 @@ export class AgentEventAdapter {
         this.transcript.appendAssistant(ev.delta)
         break
       case 'tool_call':
-        this.transcript.addTool(ev.name, ev.args)
+        this.transcript.addTool(ev.name, ev.args, ev.id)
         break
       case 'tool_result':
-        this.transcript.setToolResult(ev.result, ev.result.startsWith('error:'))
+        this.transcript.setToolResultById(ev.id, ev.result, ev.result.startsWith('error:'))
         break
       case 'user_interject':
         this.transcript.addUser(ev.text)
+        break
+      case 'retry':
+        // Surface retry progress in the transcript so the user can see the
+        // assistant turn being restarted on a transient error.
+        {
+          const raw = ev.errorMessage
+          const msg = raw.length > 80 ? `${raw.slice(0, 77)}...` : raw
+          this.transcript.appendLine(styleText('bashMode', `↻ retry (${ev.attempt}/${ev.maxAttempts}) · ${msg}`))
+        }
         break
       case 'usage':
         break
@@ -60,8 +71,8 @@ export class AgentEventAdapter {
 }
 
 /**
- * Populate a transcript from persisted session messages, so a previous
- * conversation is visible at boot. Text blocks render as role-labeled
+ * Populate a transcript from in-memory messages, so any messages present at
+ * boot are visible. Text blocks render as role-labeled
  * blocks; tool_use / tool_result content blocks pair into tool blocks.
  * Without an explicit target, a fresh transcript is created and returned.
  */
@@ -79,10 +90,10 @@ export function hydrateTranscript(messages: readonly Message[], transcript = new
           else transcript.appendAssistant(block.text)
           break
         case 'tool_use':
-          transcript.addTool(block.name, block.input)
+          transcript.addTool(block.name, block.input, block.id)
           break
         case 'tool_result':
-          transcript.setToolResult(block.content, block.content.startsWith('error:'))
+          transcript.setToolResultById(block.tool_use_id, block.content, block.content.startsWith('error:'))
           break
       }
     }

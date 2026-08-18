@@ -27,6 +27,8 @@ export class Footer implements Component {
   private spinnerFrame = 0
   private animTimer: ReturnType<typeof setInterval> | undefined
   private requestRender: () => void = () => {}
+  /** Set while a retry backoff is in progress; cleared when the next output arrives. */
+  private retryNotice: string | null = null
 
   /** Wire the render callback used to advance the spinner animation. */
   setRequestRender(fn: () => void): void {
@@ -53,9 +55,16 @@ export class Footer implements Component {
     if (!this.active && (ev.type === 'tool_call' || ev.type === 'assistant_text')) {
       this.startTurn()
     }
+    // Any fresh output clears a pending retry notice.
+    if (ev.type === 'assistant_text' || ev.type === 'tool_call' || ev.type === 'turn_end') {
+      this.retryNotice = null
+    }
     switch (ev.type) {
+      case 'retry':
+        this.retryNotice = `retry ${ev.attempt}/${ev.maxAttempts}`
+        break
       case 'assistant_text':
-        this.tracker.onWriting(ev.delta.length)
+        this.tracker.onWriting(ev.delta)
         break
       case 'tool_call':
         this.tracker.onExecutingStart()
@@ -97,13 +106,14 @@ export class Footer implements Component {
     }
   }
 
-  render(_width: number): string[] {
+  render(width: number): string[] {
     if (!this.active) return []
     const status = this.tracker.getStatus()
     const elapsed = formatWorkingElapsed(Date.now() - this.workingStartedAt)
     const arrow = status.direction === 'down' ? '↓' : '↑'
     const tokenPart = status.tokens > 0 ? `${arrow} ${formatTokenCount(status.tokens)} tokens` : ''
-    const parts = [AGENT_ACTIVITY_LABELS[status.activity]]
+    const activityLabel = this.retryNotice ?? AGENT_ACTIVITY_LABELS[status.activity]
+    const parts = [activityLabel]
     if (tokenPart) parts.push(tokenPart)
     parts.push(elapsed)
     const line = parts.join(' · ')
