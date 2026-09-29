@@ -19,6 +19,14 @@ import { stripVTControlCharacters } from 'node:util';
 const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f-\u009f]/g;
 
 /**
+ * Narrow an unknown thrown value to a Node fs/net error, whose `code` (ENOENT,
+ * EBUSY, ELOOP, EPERM) is what the atomic-write and journal paths branch on.
+ */
+export function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && 'code' in error;
+}
+
+/**
  * Remove ANSI/VT sequences and remaining control characters, so a tool's output
  * can be echoed into a message that is shown to a human or hashed into a resume
  * key without smuggling escape codes or line breaks through.
