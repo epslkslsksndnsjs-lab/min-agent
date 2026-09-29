@@ -37,6 +37,7 @@ export function stripAnsiAndControl(text: string): string {
 
 export interface DebugLogger {
   debug(message: string, ...args: unknown[]): void;
+  info(message: string, ...args: unknown[]): void;
   warn(message: string, ...args: unknown[]): void;
   error(message: string, ...args: unknown[]): void;
 }
@@ -88,6 +89,7 @@ function stringify(value: unknown): string {
 export function createDebugLogger(tag: string): DebugLogger {
   return {
     debug: (message, ...args) => write('DEBUG', tag, message, args),
+    info: (message, ...args) => write('INFO', tag, message, args),
     warn: (message, ...args) => write('WARN', tag, message, args),
     error: (message, ...args) => write('ERROR', tag, message, args),
   };
