@@ -1581,7 +1581,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
           agentOpts.isolation !== 'worktree'
         ) {
           throw new Error(
-            "agent({isolation: '" + agentOpts.isolation + "'}): unknown isolation mode. " +
+            "agent({isolation: " + __b.sanitizeForMessage(JSON.stringify(agentOpts.isolation)) + "}): unknown isolation mode. " +
             "The only mode is 'worktree'."
           );
         }

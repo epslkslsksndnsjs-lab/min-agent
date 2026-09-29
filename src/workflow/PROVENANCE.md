@@ -24,6 +24,23 @@ Files read from: `packages/core/src/`
 | `schema-validator.ts` | `utils/schemaValidator.ts` | debug logger import rebased; `ajv` + `ajv-formats` added as dependencies (upstream already depended on both) |
 | `structured-output.ts` | `tools/syntheticOutput.ts` | rewritten against min-agent's `AgentTool` instead of `BaseDeclarativeTool`; the tool description is min-agent's own wording; the telemetry redaction placeholder and the deferred-tool/`alwaysLoad` wiring have no counterpart here and are omitted |
 | `support.ts` | `utils/textUtils.ts` + `utils/debugLogger.ts` | reimplemented: debug logging appends to a file rather than stderr, because the TUI owns the screen and a stray write corrupts the diffed frame |
+
+## Fixes found while porting
+
+- `sandbox.ts`: the `agent({isolation})` rejection spliced the script-controlled
+  value into its message unsanitized, while every other script-controlled echo
+  went through `sanitizeForMessage`. `JSON.stringify` escapes C0 controls only, so
+  DEL and C1 (including NEL) survive it and would reach the terminal, where the
+  TUI diffs frames character by character. Now sanitized. Covered by
+  `sandbox.test.ts > strips control characters from an echoed isolation value`.
+
+## Test suites carried over
+
+`sandbox.test.ts`, `schema.test.ts`, `script-shape.test.ts`, `meta-literal.test.ts`,
+`dispatch-scheduler.test.ts`, `size.test.ts` come from upstream's suites of the same
+name. Cases that asserted behavior deliberately removed above were rewritten to
+assert the *refusal* instead (`effort`, `agentType`, `isolation:'remote'`), so the
+removals are pinned by tests rather than silently untested.
 | `events.ts` | `agents/runtime/agent-events.ts` | payload shapes rebased onto min-agent types (tool output is a `string`, no `@google/genai` parts); `AgentEventEmitter` reimplemented as a dependency-free `WorkflowEventEmitter`; every payload carries `runId` + `dispatchId`; added `WORKFLOW_PROGRESS_EVENTS` for the stall watchdog |
 
 ## Not ported, and why
