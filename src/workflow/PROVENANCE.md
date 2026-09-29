@@ -16,6 +16,14 @@ Files read from: `packages/core/src/`
 | `meta-literal.ts` | `agents/runtime/workflow-meta-literal.ts` | none |
 | `script-shape.ts` | `agents/runtime/workflow-script-shape.ts` | none |
 | `size.ts` | `agents/runtime/workflow-size.ts` | import path rebased to `./env.js` |
+| `correlation.ts` | `agents/workflow-correlation.ts` | none |
+| `agent-tools.ts` | `agents/runtime/workflow-agent-tools.ts` | the MCP-pattern, `exec` and `agentType` branches are gone (min-agent has none of those surfaces); entry validation and availability narrowing are split, so `describeAgentToolAllowEntryProblem` judges spelling only |
+| `events.ts` | `agents/runtime/agent-events.ts` | payload shapes rebased onto min-agent types (tool output is a `string`, no `@google/genai` parts); `AgentEventEmitter` reimplemented dependency-free; every payload carries `runId` + `dispatchId`; added `WORKFLOW_PROGRESS_EVENTS` for the stall watchdog |
+| `sandbox.ts` | `agents/runtime/workflow-sandbox.ts` | imports rebased; `agent({effort})` and `agent({agentType})` removed, along with `isolation:'remote'`; host-side tool-name canonicalization removed, since min-agent has exactly one spelling per tool; env names `QWEN_CODE_*` → `MIN_AGENT_*`; message examples use min-agent's tool names |
+| `schema.ts` | `agents/runtime/workflow-schema.ts` | imports rebased |
+| `schema-validator.ts` | `utils/schemaValidator.ts` | debug logger import rebased; `ajv` + `ajv-formats` added as dependencies (upstream already depended on both) |
+| `structured-output.ts` | `tools/syntheticOutput.ts` | rewritten against min-agent's `AgentTool` instead of `BaseDeclarativeTool`; the tool description is min-agent's own wording; the telemetry redaction placeholder and the deferred-tool/`alwaysLoad` wiring have no counterpart here and are omitted |
+| `support.ts` | `utils/textUtils.ts` + `utils/debugLogger.ts` | reimplemented: debug logging appends to a file rather than stderr, because the TUI owns the screen and a stray write corrupts the diffed frame |
 | `events.ts` | `agents/runtime/agent-events.ts` | payload shapes rebased onto min-agent types (tool output is a `string`, no `@google/genai` parts); `AgentEventEmitter` reimplemented as a dependency-free `WorkflowEventEmitter`; every payload carries `runId` + `dispatchId`; added `WORKFLOW_PROGRESS_EVENTS` for the stall watchdog |
 
 ## Not ported, and why
