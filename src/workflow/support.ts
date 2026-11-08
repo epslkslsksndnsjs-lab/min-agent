@@ -35,6 +35,37 @@ export function stripAnsiAndControl(text: string): string {
   return stripVTControlCharacters(text).replace(CONTROL_CHARS_RE, '');
 }
 
+/** Bidirectional embedding, override and isolate controls (CVE-2021-42574). */
+function isBidiControlChar(code: number): boolean {
+  return (code >= 0x202a && code <= 0x202e) || (code >= 0x2066 && code <= 0x2069);
+}
+
+/**
+ * Strip C0 controls except TAB, all C1 controls, and bidi controls from text
+ * destined for a single-line display surface.
+ *
+ * Unlike {@link stripAnsiAndControl} this deletes bytes rather than replacing
+ * them, keeps DEL (0x7f), and preserves the whitespace shape — which is what a
+ * compact status line or notification label needs. The bidi range is removed
+ * because shell and agent output that carries those characters can reorder
+ * adjacent text in renderers that honor them, even after escapes are gone.
+ */
+export function stripDisplayControlChars(text: string): string {
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code === 0x09) {
+      out += text[i];
+      continue;
+    }
+    if (code < 0x20) continue;
+    if (code >= 0x80 && code <= 0x9f) continue;
+    if (isBidiControlChar(code)) continue;
+    out += text[i];
+  }
+  return out;
+}
+
 export interface DebugLogger {
   debug(message: string, ...args: unknown[]): void;
   info(message: string, ...args: unknown[]): void;

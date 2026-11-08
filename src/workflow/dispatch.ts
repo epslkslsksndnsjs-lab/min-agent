@@ -86,19 +86,6 @@ export interface MinAgentDispatchOptions {
   emitter?: WorkflowEventEmitter;
   /** Output tokens of each settled dispatch, fed to the budget ledger. */
   onTokens?: (outputTokens: number) => void;
-  /**
-   * Ask the human before a subagent runs a tool. This is the only approval
-   * channel: a pub/sub event would leave two ways to answer the same question,
-   * and a tool that nobody answers is a hung run. Absent means this session has
-   * no gate, which is min-agent's behavior today.
-   */
-  requestApproval?: (info: {
-    subagentId: string;
-    runId: string;
-    label?: string;
-    toolName: string;
-    args: unknown;
-  }) => Promise<WorkflowApprovalOutcome>;
   /** Env source for the stall default; injectable for tests. */
   env?: Record<string, string | undefined>;
 }
@@ -159,7 +146,6 @@ export function createMinAgentDispatch(
     signal,
     emitter,
     onTokens,
-    requestApproval,
   } = options;
   const stallEnv = options.env;
 
@@ -318,9 +304,43 @@ export function createMinAgentDispatch(
       messages: [{ role: 'user', content: prompt }],
     };
 
-    const gatedTools = requestApproval
-      ? subTools.map((tool) => gateTool(tool, requestApproval, { subagentId, runId, label, emit, roundsOf: () => rounds }))
-      : subTools;
+    /**
+     * Ask the human, through the bus. Nothing else can answer: the dialog is
+     * drawn by whatever surface reads the run registry, and in a print-mode
+     * session there may be none — so "no listener" resolves to `null`, which
+     * means "no gate", rather than hanging or defaulting to a denial the user
+     * never configured.
+     */
+    let approvalSeq = 0;
+    const ask = (
+      tool: AgentTool,
+      args: unknown,
+      signal?: AbortSignal,
+    ): Promise<WorkflowApprovalOutcome | null> =>
+      new Promise((resolve) => {
+        if (!emitter || emitter.listenerCount('tool_waiting_approval') === 0) {
+          resolve(null);
+          return;
+        }
+        let answered = false;
+        const settle = (outcome: WorkflowApprovalOutcome): void => {
+          if (answered) return;
+          answered = true;
+          signal?.removeEventListener('abort', onAbort);
+          resolve(outcome);
+        };
+        const onAbort = (): void => settle('deny');
+        signal?.addEventListener('abort', onAbort, { once: true });
+        emit('tool_waiting_approval', {
+          callId: `${subagentId}:${tool.name}:${++approvalSeq}`,
+          name: tool.name,
+          args,
+          description: `Allow the workflow agent${label ? ` "${label}"` : ''} to run ${tool.name}?`,
+          respond: settle,
+        });
+      });
+
+    const gatedTools = subTools.map((tool) => gateTool(tool, ask));
 
     const transcriptPath = paths.transcriptPath(runId, subagentId);
     const record = async (line: Record<string, unknown>): Promise<void> => {
@@ -515,32 +535,29 @@ export function createMinAgentDispatch(
 }
 
 /** Wrap a tool so the human can veto it. */
+/**
+ * Wrap a tool so a human can veto it through the run's approval channel.
+ *
+ * `ask` resolves to `null` when nobody is listening. That is not a timeout or a
+ * convenient fallback: a session with no approval surface has no gate, and
+ * answering on its behalf is the only option that cannot hang the run. An abort
+ * answers `deny`, because a cancelled run must not stay alive awaiting a dialog
+ * that will never arrive.
+ */
 function gateTool(
   tool: AgentTool,
-  requestApproval: NonNullable<MinAgentDispatchOptions['requestApproval']>,
-  ctx: {
-    subagentId: string;
-    runId: string;
-    label?: string;
-    emit: <E extends keyof WorkflowEventMap>(
-      type: E,
-      payload: WorkflowEventPayload<E>,
-    ) => void;
-    roundsOf: () => number;
-  },
+  ask: (
+    tool: AgentTool,
+    args: unknown,
+    signal?: AbortSignal,
+  ) => Promise<WorkflowApprovalOutcome | null>,
 ): AgentTool {
   return {
     ...tool,
     execute: async (args: unknown, signal?: AbortSignal): Promise<string> => {
-      const outcome = await requestApproval({
-        subagentId: ctx.subagentId,
-        runId: ctx.runId,
-        ...(ctx.label !== undefined ? { label: ctx.label } : {}),
-        toolName: tool.name,
-        args,
-      });
+      const outcome = await ask(tool, args, signal);
       if (outcome === 'deny') {
-        // A denial is returned to the model as a tool error rather than thrown,
+        // A denial reaches the model as a tool error rather than an exception,
         // so the agent can still finish and say what it wanted to do.
         return `error: the user denied this ${tool.name} call from a workflow agent`;
       }

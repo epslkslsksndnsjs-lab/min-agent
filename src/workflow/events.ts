@@ -21,6 +21,7 @@ export const WorkflowAgentEventType = {
   TOOL_CALL: 'tool_call',
   TOOL_RESULT: 'tool_result',
   TOOL_OUTPUT_UPDATE: 'tool_output_update',
+  TOOL_WAITING_APPROVAL: 'tool_waiting_approval',
   USAGE_METADATA: 'usage_metadata',
   EXTERNAL_MESSAGE: 'external_message',
   RETRY: 'retry',
@@ -95,13 +96,31 @@ export interface WorkflowToolOutputUpdateEvent extends WorkflowEventBase {
 }
 
 /**
- * A tool call inside a workflow subagent needs the user's decision. It is NOT
- * carried on this bus: the dispatch asks through a callback, and the terminal's
- * dialog implements it, because the dialog needs to block a tool and return a
- * verdict — a pub/sub channel would leave two ways to answer the same question.
- * What the bus does carry is the outcome, as an ordinary tool_result whose text
- * says the call was denied.
+ * A tool call inside a workflow subagent needs the user's decision.
+ *
+ * This is the ONLY approval channel: the dispatch raises the event, the run
+ * registry holds it in `pendingApprovals` so a surface that was not even open
+ * when the question was asked can still answer it, and `respond` is the one way
+ * to answer. A second channel — a callback handed to the dispatch, say — would
+ * let two answerers race, and the run would hang whichever one nobody wired up
+ * was expected to answer.
  */
+export interface WorkflowApprovalEvent extends WorkflowEventBase {
+  callId: string;
+  name: string;
+  args: unknown;
+  /** What the user is being asked to accept, in one line. */
+  description: string;
+  /**
+   * The one way to answer. It may settle asynchronously because the surface
+   * that answers is a dialog several frames away. No second argument: upstream
+   * carries an "edited arguments" payload, and min-agent's tools have no
+   * modify-before-allow dialog to produce it.
+   */
+  respond: (outcome: WorkflowApprovalOutcome) => void | Promise<void>;
+}
+
+export type WorkflowApprovalOutcome = 'allow' | 'deny' | 'always';
 
 export interface WorkflowUsageEvent extends WorkflowEventBase {
   promptTokens: number;
@@ -145,6 +164,7 @@ export interface WorkflowEventMap {
   tool_call: WorkflowToolCallEvent;
   tool_result: WorkflowToolResultEvent;
   tool_output_update: WorkflowToolOutputUpdateEvent;
+  tool_waiting_approval: WorkflowApprovalEvent;
   usage_metadata: WorkflowUsageEvent;
   external_message: WorkflowExternalMessageEvent;
   retry: WorkflowRetryEvent;

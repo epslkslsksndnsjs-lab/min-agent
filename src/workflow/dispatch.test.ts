@@ -250,14 +250,38 @@ describe('createMinAgentDispatch', () => {
       ],
     );
 
-    const result = await makeDispatch({ requestApproval: async () => 'deny' })('x', {
-      stallMs: 0,
-    });
+    // The approval channel is the bus: a surface answers by calling `respond`.
+    const emitter = new WorkflowEventEmitter();
+    emitter.on('tool_waiting_approval', (event) => event.respond('deny'));
+
+    const result = await makeDispatch({ emitter })('x', { stallMs: 0 });
 
     expect(result).toBe('understood');
-    // The denial reached the model as the tool result, not as an exception, so
+    // The denial reaches the model as the tool result, not as an exception, so
     // the agent can still finish and say what it wanted.
     expect(JSON.stringify(calls[1]!.messages)).toContain('the user denied this read_file call');
+  });
+
+  it('runs the tool unasked when no approval surface is listening', async () => {
+    mockStream(
+      [
+        { type: 'tool_call', id: 't1', name: 'read_file', args: { path: 'a' } },
+        { type: 'done', stopReason: 'tool_use' },
+      ],
+      [
+        { type: 'text_delta', delta: 'read it' },
+        { type: 'done', stopReason: 'end_turn' },
+      ],
+    );
+    // An emitter with no approval listener — the shape of a print-mode session.
+    const emitter = new WorkflowEventEmitter();
+
+    const result = await makeDispatch({ emitter })('x', { stallMs: 0 });
+
+    // "Nobody to ask" is no gate: not a hang, and not a denial the user never
+    // configured. The tool ran and its output came back.
+    expect(result).toBe('read it');
+    expect(JSON.stringify(calls[1]!.messages)).toContain('file contents');
   });
 
   it('publishes the subagent tool calls onto the run bus', async () => {
